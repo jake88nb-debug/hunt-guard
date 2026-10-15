@@ -66,7 +66,31 @@ def _debug(message):
 
 
 def _guess_root():
-    """从 sys.path 里找带 waf/guard.py 的目录。"""
+    """定位安装根目录（含 waf/guard.py 的那个目录）。
+
+    顺序：
+      1. WAF_ROOT —— 显式指定（waf-run 会设）
+      2. HUNTGUARD_HOME / AGENTWAF_HOME —— 安装时写进用户环境变量的
+         **主指针**，README 里说明的定位方式
+      3. sys.path 里找带 waf/guard.py 的目录
+
+    为什么必须加第 2 条（曾经整条 Python 通道因此失效）：
+    PYTHONPATH 指向的是 ``<安装目录>/hooks``，里面只有
+    ``sitecustomize.py`` —— 没有 ``waf/`` 子目录。所以只靠
+    sys.path 扫描**永远找不到根目录**，``_check_active()`` 随即
+    返回 False，护栏一直不装。表现为：控制台开着、settings.enabled
+    是 true，但 AI 用 ``urllib`` / ``requests`` 发的 delete 请求
+    完全不被检查（curl 通道正常，因为走的是另一条路）。
+    """
+    explicit = os.environ.get("WAF_ROOT")
+    if explicit and os.path.isfile(os.path.join(explicit, "waf", "guard.py")):
+        return explicit
+
+    for name in ("HUNTGUARD_HOME", "AGENTWAF_HOME"):
+        home = os.environ.get(name)
+        if home and os.path.isfile(os.path.join(home, "waf", "guard.py")):
+            return home
+
     for entry in list(sys.path):
         if entry and os.path.isfile(os.path.join(entry, "waf", "guard.py")):
             return entry
