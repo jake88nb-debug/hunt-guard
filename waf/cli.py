@@ -639,7 +639,26 @@ def cmd_doctor(args):
              _importable("requests"),
              "已安装（guard 会补丁它）",
              "未安装（可选；只在 AI 脚本用 requests 时才有意义）")
-    line("规则文件", os.path.exists(config.rules_path()), config.rules_path())
+    # 规则文件：首次运行前**本来就不存在**，不算故障。
+    #
+    # 内置规则编译在 waf/rules.py 里，引擎加载时直接用 —— 磁盘上没有
+    # rules.json 也能正常拦截。文件只在两种情况出现：
+    #   1. 启动控制台（cmd_start 会调 write_defaults_if_missing）
+    #   2. 用户改过规则（UI / wafctl 写回）
+    # 早先用 line() 判"存在"，于是**全新克隆**跑 doctor 会报
+    # [!!] 规则文件 —— 用户以为装坏了，其实拦截完全正常（实测踩过）。
+    _rules_path = config.rules_path()
+    _rules_exists = os.path.exists(_rules_path)
+    if _rules_exists:
+        try:
+            _n = len(rules_mod.load_document(_rules_path).get("rules") or [])
+            _rules_detail = "%s（%d 条）" % (_rules_path, _n)
+        except Exception:
+            _rules_detail = "%s（读取失败）" % _rules_path
+    else:
+        _rules_detail = ("%s（首次运行自动生成，当前用内置规则）"
+                         % _rules_path)
+    optional("规则文件", _rules_exists, _rules_detail, _rules_detail)
     line("UI 文件", os.path.exists(os.path.join(config.UI_DIR, "index.html")),
          os.path.join(config.UI_DIR, "index.html"))
     cfg = config.load_config()
