@@ -5,6 +5,44 @@
 
 ---
 
+## 1.1.5 — 2026-10-15
+
+### 重要修复：Python 通道此前完全失效
+
+**症状**：AI 用 `urllib` / `requests` 发 `DELETE` 删除本地文件，
+不被拦截 —— 而同样的动作换成 `curl` 就拦得住。
+
+**根因**：`autohook._guess_root()` 只从 `sys.path` 扫描
+`waf/guard.py`，而 `PYTHONPATH` 指向的是 `<安装目录>/hooks`
+（里面只有 `sitecustomize.py`，没有 `waf/` 子目录）——
+**永远找不到安装根目录**，`_check_active()` 随即返回 False，
+护栏一直没装上。
+
+实测链条：`sitecustomize` 确实被加载了，但 `waf.guard` 与 `autohook`
+都没进 `sys.modules`，`urlopen` 仍是原版。
+
+**影响面**：Python 进程里的所有请求（urllib / requests / httpx /
+aiohttp）与 `subprocess` / `os.system` 命令都不检查。
+`curl` 通道正常（走 `bin/curl` shim，不依赖这个函数），
+所以缺口只在"AI 写 Python 脚本"时暴露 —— 而这类用法很常见。
+
+**修法**：`_guess_root()` 优先读 `HUNTGUARD_HOME` / `AGENTWAF_HOME`
+主指针（安装时已写入用户环境变量），其次才扫 `sys.path`。
+
+**验证**：修复前 `urlopen` 是原版 → DELETE 放行、文件被删；
+修复后 `urlopen` 是 `waf.guard.guarded_urlopen` → DELETE 被拦、
+文件未被删除。
+
+### 升级方式
+
+```bash
+wafctl stop && wafctl start
+```
+
+控制台重新读取修复后的模块（正在运行的进程用的是旧代码）。
+
+---
+
 ## 1.1.4 — 2026-10-15
 
 ### 拦截能力

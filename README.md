@@ -871,5 +871,5 @@ python3 waf/cli.py stop
 
 ## 更新记录
 
-见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **1.1.4**
+见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **1.1.5**
 （拦截面与安全修复较多，建议升级后跑一次 `wafctl install-path --force`）。
