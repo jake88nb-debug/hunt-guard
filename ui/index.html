@@ -1,0 +1,1418 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HuntGuard 控制台</title>
+<style>
+/* ====================================================================
+   主题
+   --------------------------------------------------------------------
+   所有颜色都走变量，切主题 = 换一组变量值。新增主题只需再加一个
+   [data-theme=...] 块，不用碰任何组件样式。
+
+   变量分两类：
+     * 结构色（bg/bg2/bg3/line/line2/line3/fg/fg2）——页面骨架
+     * 语义色（ok/warn/crit/mon/acc + 各自的 -fg/-bg/-line）——
+       危险、警告、成功、监控四个状态，每个拆成"主色 / 前景文字 /
+       背景 / 边框"四档。浅色主题下把前景调深、背景调浅即可，
+       不需要改任何组件规则。
+   ==================================================================== */
+:root{
+  /* ---- 深色（默认）---- */
+  --bg:#0e1116; --bg2:#151a21; --bg3:#1c232c;
+  --line:#2a3340; --line2:#39424f; --line3:#212932;
+  --fg:#dde3ea; --fg2:#93a1b1;
+  --acc:#4c8dff; --acc2:#2f6fd0; --acc-bg:#1b2a44; --acc-line:#1f5666;
+  --acc-hover:#3a80e6;
+  --ok:#3ecf8e; --ok-fg:#a6f0cd; --ok-bg:#0b1512; --ok-line:#25543f;
+  --warn:#f5a524; --warn-fg:#ffd27a; --warn-bg:#2a1f0a; --warn-line:#6b4a12;
+  --warn-bg2:#3a2a0c;
+  --crit:#ff5c5c; --crit-fg:#ff9b9b; --crit-bg:#3a1616; --crit-bg2:#150c0c;
+  --crit-line:#6b2626;
+  --mon:#a78bfa; --mon-fg:#cdbcf7; --mon-bg:#252046; --mon-line:#443a7a;
+  --high-bg:#3a2410; --med-bg:#2b3016;
+  --neutral-bg:#22262e; --neutral-line:#3a424e;
+  --code-bg:#080b0f; --input-bg:#0b0f14;
+  --hover-bg:#202a36; --row-hover:#161c24;
+  --on-glow:#0d2418; --paused-glow:#2a2113;
+  --knob:#e8eef5;
+  --mono:"Cascadia Mono","Consolas","SF Mono",Menlo,monospace;
+}
+
+/* ---- 浅色 ---- */
+[data-theme="light"]{
+  --bg:#f4f6f9; --bg2:#ffffff; --bg3:#eef1f5;
+  --line:#d8dee7; --line2:#c2cad6; --line3:#e6eaf0;
+  --fg:#1c2430; --fg2:#5b6675;
+  --acc:#1f6feb; --acc2:#1a5fd0; --acc-bg:#e3edfd; --acc-line:#9dc0f7;
+  --acc-hover:#1a5fd0;
+  --ok:#1a7f4b; --ok-fg:#15663d; --ok-bg:#e6f6ec; --ok-line:#a8dcbf;
+  --warn:#b26a00; --warn-fg:#8a5200; --warn-bg:#fff3e0; --warn-line:#f0c48a;
+  --warn-bg2:#ffe8c9;
+  --crit:#c62828; --crit-fg:#a01f1f; --crit-bg:#fdeaea; --crit-bg2:#fbdcdc;
+  --crit-line:#f0b0b0;
+  --mon:#6d4fc4; --mon-fg:#5a3fb0; --mon-bg:#f0ebfd; --mon-line:#c9b8f0;
+  --high-bg:#fff3e0; --med-bg:#f2f8e0;
+  --neutral-bg:#eef1f5; --neutral-line:#d8dee7;
+  --code-bg:#f7f9fc; --input-bg:#ffffff;
+  --hover-bg:#e9eef6; --row-hover:#f5f8fc;
+  --on-glow:#d7f2e2; --paused-glow:#fdeed2;
+  --knob:#ffffff;
+}
+
+/* ---- 护眼绿（低对比，久盯不累）---- */
+[data-theme="green"]{
+  --bg:#0f1a14; --bg2:#16241c; --bg3:#1d2f25;
+  --line:#2a4133; --line2:#39543f; --line3:#22352a;
+  --fg:#dce8e0; --fg2:#8fa896;
+  --acc:#4dbf87; --acc2:#3a9d6c; --acc-bg:#1b3a2a; --acc-line:#2f6b4d;
+  --acc-hover:#3a9d6c;
+  --ok:#5fd39a; --ok-fg:#a8f0cb; --ok-bg:#0d2419; --ok-line:#2a5f43;
+  --warn:#e0b657; --warn-fg:#ffd98a; --warn-bg:#2a2410; --warn-line:#6b5a20;
+  --warn-bg2:#3a3212;
+  --crit:#ef6b6b; --crit-fg:#ffabab; --crit-bg:#3a1e1e; --crit-bg2:#1a0d0d;
+  --crit-line:#6b2c2c;
+  --mon:#a58bf0; --mon-fg:#cdbcf7; --mon-bg:#282046; --mon-line:#463a7a;
+  --high-bg:#3a2a10; --med-bg:#2b3016;
+  --neutral-bg:#22302a; --neutral-line:#39543f;
+  --code-bg:#0a130e; --input-bg:#0c1712;
+  --hover-bg:#22352a; --row-hover:#182a20;
+  --on-glow:#123020; --paused-glow:#2a2410;
+  --knob:#dce8e0;
+}
+
+/* ---- 海洋蓝 ---- */
+[data-theme="ocean"]{
+  --bg:#0b1622; --bg2:#11202f; --bg3:#172b3d;
+  --line:#213c52; --line2:#2e4f6a; --line3:#1a2f42;
+  --fg:#d8e6f2; --fg2:#8aa4bb;
+  --acc:#3f9fe8; --acc2:#2f84c9; --acc-bg:#14344d; --acc-line:#2b658f;
+  --acc-hover:#2f84c9;
+  --ok:#3fc99b; --ok-fg:#9ef0d2; --ok-bg:#0b2420; --ok-line:#255f4d;
+  --warn:#e8b04d; --warn-fg:#ffd68a; --warn-bg:#2a1f0c; --warn-line:#6b4f16;
+  --warn-bg2:#3a2c10;
+  --crit:#f06060; --crit-fg:#ffa8a8; --crit-bg:#361a1a; --crit-bg2:#150a0a;
+  --crit-line:#6b2a2a;
+  --mon:#9b8ef0; --mon-fg:#c9bcf7; --mon-bg:#221f46; --mon-line:#413a7a;
+  --high-bg:#362a10; --med-bg:#25301a;
+  --neutral-bg:#1c2d3d; --neutral-line:#2e4f6a;
+  --code-bg:#060f17; --input-bg:#0a1520;
+  --hover-bg:#1c3145; --row-hover:#14253a;
+  --on-glow:#0c2a2a; --paused-glow:#2a1f0c;
+  --knob:#d8e6f2;
+}
+
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;height:100%}
+body{background:var(--bg);color:var(--fg);font:13px/1.55 system-ui,"Microsoft YaHei",sans-serif}
+a{color:var(--acc);text-decoration:none}
+a:hover{text-decoration:underline}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+.wrap{display:flex;flex-direction:column;min-height:100vh}
+
+/* header */
+header{background:var(--bg2);border-bottom:1px solid var(--line);padding:10px 16px;
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap;position:sticky;top:0;z-index:20}
+.logo{font-weight:700;font-size:15px;letter-spacing:.5px;display:flex;align-items:center;gap:8px}
+.logo .dot{width:9px;height:9px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok)}
+.logo .dot.off{background:var(--crit);box-shadow:0 0 8px var(--crit)}
+.logo .dot.mon{background:var(--mon);box-shadow:0 0 8px var(--mon)}
+.logo small{font-weight:400;color:var(--fg2);font-size:11px}
+.logo .by{font-weight:400;color:var(--fg2);font-size:11.5px;letter-spacing:0;
+  padding-left:9px;margin-left:1px;border-left:1px solid var(--line)}
+.logo .by b{color:var(--fg);font-weight:600}
+.stat{display:flex;gap:12px;flex-wrap:wrap;margin-left:auto;align-items:center}
+
+/* 主题切换：四个色点，各自显示该主题的配色 */
+.themer{display:flex;gap:6px;align-items:center;margin-left:14px;
+  padding-left:14px;border-left:1px solid var(--line)}
+.theme-dot{width:15px;height:15px;border-radius:50%;border:2px solid transparent;
+  padding:0;cursor:pointer;transition:.15s;position:relative;flex:0 0 auto}
+.theme-dot:hover{transform:scale(1.18)}
+.theme-dot[aria-pressed="true"]{border-color:var(--fg);box-shadow:0 0 0 2px var(--bg2) inset}
+/* 每个点画成"半深半浅"的小球，一眼看出是哪套配色 */
+.theme-dot[data-theme="dark"]{background:linear-gradient(135deg,#2a3340 50%,#0e1116 50%)}
+.theme-dot[data-theme="light"]{background:linear-gradient(135deg,#ffffff 50%,#f4f6f9 50%);
+  border-color:var(--line2)}
+.theme-dot[data-theme="green"]{background:linear-gradient(135deg,#4dbf87 50%,#0f1a14 50%)}
+.theme-dot[data-theme="ocean"]{background:linear-gradient(135deg,#3f9fe8 50%,#0b1622 50%)}
+.theme-dot[aria-pressed="true"]{border-color:var(--acc)}
+.pill{background:var(--bg3);border:1px solid var(--line);border-radius:999px;
+  padding:3px 10px;font-size:11.5px;color:var(--fg2);white-space:nowrap}
+.pill b{color:var(--fg);font-weight:600}
+.pill.crit{border-color:var(--crit-line);color:var(--crit-fg)}
+.pill.ok{border-color:var(--ok-line);color:var(--ok-fg)}
+.pill.mon{border-color:var(--mon-line);color:var(--mon-fg)}
+
+/* unlock banner */
+#unlockBanner{display:none;background:linear-gradient(90deg,var(--warn-bg2),var(--warn-bg));
+  border-bottom:1px solid var(--warn-line);padding:9px 16px;gap:10px;align-items:center;flex-wrap:wrap}
+#unlockBanner.show{display:flex}
+#unlockBanner b{color:var(--warn-fg)}
+#unlockBanner .spacer{margin-left:auto}
+
+/* 总开关条 */
+#switchBar{display:flex;align-items:center;gap:14px;padding:12px 16px;
+  border-bottom:1px solid var(--line);flex-wrap:wrap;transition:.2s}
+#switchBar.on{background:linear-gradient(90deg,var(--on-glow),var(--bg))}
+#switchBar.paused{background:linear-gradient(90deg,var(--paused-glow),var(--bg))}
+#switchBar .swlabel{font-size:13px;font-weight:600;display:flex;align-items:center;gap:9px}
+#switchBar .swlabel .dot2{width:10px;height:10px;border-radius:50%;flex:0 0 auto}
+#switchBar.on .dot2{background:var(--ok);box-shadow:0 0 10px var(--ok)}
+#switchBar.paused .dot2{background:var(--warn);box-shadow:0 0 10px var(--warn)}
+#switchBar .desc{color:var(--fg2);font-size:12px}
+#switchBar .spacer{margin-left:auto}
+.switch-big{position:relative;display:inline-block;width:52px;height:27px;flex:0 0 auto}
+.switch-big input{opacity:0;width:0;height:0}
+.switch-big span{position:absolute;inset:0;background:var(--line2);border-radius:999px;
+  transition:.18s;cursor:pointer}
+.switch-big span:before{content:"";position:absolute;width:19px;height:19px;left:4px;top:4px;
+  background:var(--knob);border-radius:50%;transition:.18s}
+.switch-big input:checked+span{background:var(--ok)}
+.switch-big input:checked+span:before{transform:translateX(25px)}
+.switch-big input:disabled+span{opacity:.45;cursor:not-allowed}
+.btn{border:1px solid var(--line);background:var(--bg3);border-radius:6px;
+  padding:6px 12px;transition:.12s}
+.btn:hover{border-color:var(--acc);background:var(--hover-bg)}
+.btn.pri{background:var(--acc2);border-color:var(--acc2);color:#fff}
+.btn.pri:hover{background:var(--acc-hover)}
+.btn.danger{border-color:var(--crit-line);color:var(--crit-fg)}
+.btn.danger:hover{background:var(--crit-bg2)}
+.btn.warn{border-color:var(--warn-line);color:var(--warn-fg)}
+.btn.warn:hover{background:var(--warn-bg2)}
+.btn.sm{padding:3px 8px;font-size:11.5px}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+
+/* tabs */
+nav{display:flex;gap:2px;background:var(--bg2);border-bottom:1px solid var(--line);
+  padding:0 12px;position:sticky;top:52px;z-index:19;overflow-x:auto}
+nav button{background:none;border:0;border-bottom:2px solid transparent;
+  padding:10px 14px;color:var(--fg2);white-space:nowrap}
+nav button:hover{color:var(--fg)}
+nav button.on{color:var(--fg);border-bottom-color:var(--acc)}
+main{padding:18px;flex:1;max-width:1500px;width:100%;margin:0 auto}
+section{display:none}
+section.on{display:block}
+h2{font-size:15px;margin:0 0 12px;display:flex;align-items:center;gap:10px}
+h2 .spacer{margin-left:auto}
+h3{font-size:13px;margin:18px 0 8px;color:var(--fg2);font-weight:600}
+.card{background:var(--bg2);border:1px solid var(--line);border-radius:9px;padding:14px;margin-bottom:14px}
+.grid{display:grid;gap:14px}
+.g2{grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
+.g3{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.metric{background:var(--bg2);border:1px solid var(--line);border-radius:9px;padding:12px 14px}
+.metric .k{color:var(--fg2);font-size:11.5px;text-transform:uppercase;letter-spacing:.6px}
+.metric .v{font-size:22px;font-weight:600;margin-top:4px;font-variant-numeric:tabular-nums}
+.metric .v small{font-size:12px;color:var(--fg2);font-weight:400}
+.metric.hot .v{color:var(--crit)}
+.metric.cool .v{color:var(--ok)}
+
+/* table */
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{text-align:left;color:var(--fg2);font-weight:600;font-size:11.5px;
+  text-transform:uppercase;letter-spacing:.5px;padding:8px 10px;
+  border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:8px 10px;border-bottom:1px solid var(--line3);vertical-align:top}
+tr:hover td{background:var(--row-hover)}
+td.mono,th.mono{font-family:var(--mono);font-size:12px}
+.tag{display:inline-block;padding:1px 7px;border-radius:4px;font-size:11px;
+  border:1px solid var(--line);background:var(--bg3);white-space:nowrap}
+.tag.critical{background:var(--crit-bg);border-color:var(--crit-line);color:var(--crit-fg)}
+.tag.high{background:var(--high-bg);border-color:var(--warn-line);color:var(--warn-fg)}
+.tag.medium{background:var(--med-bg);border-color:var(--warn-line);color:var(--ok-fg)}
+.tag.low{background:var(--acc-bg);border-color:var(--acc-line);color:var(--acc)}
+.tag.info{background:var(--neutral-bg);border-color:var(--neutral-line);color:var(--fg2)}
+.tag.block{background:var(--crit-bg);border-color:var(--crit-line);color:var(--crit-fg)}
+.tag.monitor{background:var(--mon-bg);border-color:var(--mon-line);color:var(--mon-fg)}
+.tag.off{opacity:.5}
+
+/* switch */
+.sw{position:relative;display:inline-block;width:34px;height:19px;flex:0 0 auto}
+.sw input{opacity:0;width:0;height:0}
+.sw span{position:absolute;inset:0;background:var(--line2);border-radius:999px;transition:.15s}
+.sw span:before{content:"";position:absolute;width:13px;height:13px;left:3px;top:3px;
+  background:var(--knob);border-radius:50%;transition:.15s}
+.sw input:checked+span{background:var(--ok)}
+.sw input:checked+span:before{transform:translateX(15px)}
+
+/* form */
+label{display:block;color:var(--fg2);font-size:11.5px;margin:10px 0 4px;
+  text-transform:uppercase;letter-spacing:.5px}
+input[type=text],input[type=number],select,textarea{
+  width:100%;background:var(--input-bg);border:1px solid var(--line);border-radius:6px;padding:7px 9px}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--acc)}
+textarea{font-family:var(--mono);font-size:12px;resize:vertical;min-height:80px;line-height:1.5}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
+.row>*{flex:1;min-width:130px}
+.row .shrink{flex:0 0 auto;min-width:0}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.chip{display:flex;align-items:center;gap:5px;background:var(--bg3);
+  border:1px solid var(--line);border-radius:5px;padding:3px 8px;font-size:11.5px;cursor:pointer}
+.chip input{margin:0}
+.chip.on{border-color:var(--acc);background:var(--acc-bg)}
+.hint{color:var(--fg2);font-size:11.5px;margin-top:5px;line-height:1.5}
+.hint code{background:var(--bg3);padding:1px 5px;border-radius:3px;font-family:var(--mono)}
+
+/* result */
+pre{background:var(--code-bg);border:1px solid var(--line);border-radius:7px;padding:12px;
+  overflow:auto;max-height:520px;font-family:var(--mono);font-size:12px;margin:0;line-height:1.5}
+pre.blocked{border-color:var(--crit-line);background:var(--crit-bg2)}
+pre.allowed{border-color:var(--ok-line);background:var(--ok-bg)}
+.hit{color:var(--crit-fg)}
+.ok{color:var(--ok-fg)}
+
+/* modal */
+.mask{display:none;position:fixed;inset:0;background:rgba(4,7,10,.72);z-index:50;
+  align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto}
+.mask.show{display:flex}
+.modal{background:var(--bg2);border:1px solid var(--line);border-radius:11px;
+  width:min(860px,100%);padding:18px}
+.modal h2{margin-bottom:14px}
+.modal .foot{display:flex;gap:10px;justify-content:flex-end;margin-top:18px;
+  border-top:1px solid var(--line);padding-top:14px}
+
+.toast{position:fixed;right:18px;bottom:18px;z-index:99;display:flex;
+  flex-direction:column;gap:8px}
+.toast div{background:var(--bg3);border:1px solid var(--line);border-left:3px solid var(--acc);
+  border-radius:7px;padding:10px 14px;font-size:12.5px;box-shadow:0 6px 22px rgba(0,0,0,.5);
+  animation:in .18s ease-out;max-width:420px;white-space:pre-wrap}
+.toast div.err{border-left-color:var(--crit)}
+.toast div.good{border-left-color:var(--ok)}
+@keyframes in{from{opacity:0;transform:translateY(8px)}}
+
+.empty{color:var(--fg2);text-align:center;padding:34px;font-size:12.5px}
+.pager{display:flex;gap:8px;align-items:center;margin-top:12px;justify-content:flex-end}
+.pager .info{margin-right:auto;color:var(--fg2);font-size:12px}
+.kbd{font-family:var(--mono);background:var(--bg3);border:1px solid var(--line);
+  border-radius:4px;padding:1px 5px;font-size:11px}
+.warnbox{background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:8px;
+  padding:11px 13px;font-size:12.5px;color:var(--warn-fg);margin-bottom:14px;line-height:1.6}
+.warnbox b{color:var(--warn-fg)}
+details summary{cursor:pointer;color:var(--fg2);font-size:12px}
+details summary:hover{color:var(--fg)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="logo">
+    <span class="dot" id="dot"></span>
+    HuntGuard <small id="ver">v1.1.4</small>
+    <span class="by">by <b>Jake</b></span>
+  </div>
+  <div class="themer" id="themer">
+    <button class="theme-dot" data-theme="dark" title="深色（默认）"
+            aria-label="深色主题"></button>
+    <button class="theme-dot" data-theme="light" title="浅色"
+            aria-label="浅色主题"></button>
+    <button class="theme-dot" data-theme="green" title="护眼绿"
+            aria-label="护眼绿主题"></button>
+    <button class="theme-dot" data-theme="ocean" title="海洋蓝"
+            aria-label="海洋蓝主题"></button>
+  </div>
+  <div class="stat" id="headStats"></div>
+</header>
+
+<div id="switchBar" class="paused">
+  <label class="switch-big" title="开启 / 暂停拦截">
+    <input type="checkbox" id="interceptSwitch" onchange="toggleIntercept(this.checked)">
+    <span></span>
+  </label>
+  <div class="swlabel"><span class="dot2"></span><span id="switchText">加载中…</span></div>
+  <div class="desc" id="switchDesc"></div>
+  <span class="spacer"></span>
+  <span class="pill" id="activeDetail"></span>
+</div>
+
+<div id="unlockBanner">
+  <b>⚠ 解锁窗口已开启</b>
+  <span>剩余 <b id="unlockLeft">--</b></span>
+  <span id="unlockReason" style="color:var(--fg2)"></span>
+  <span class="spacer"></span>
+  <button class="btn sm danger" onclick="lockNow()">立即上锁</button>
+</div>
+
+<nav id="nav">
+  <button data-tab="dash" class="on">仪表盘</button>
+  <button data-tab="rules">拦截规则</button>
+  <button data-tab="allow">放行名单</button>
+  <button data-tab="console">测试台</button>
+  <button data-tab="events">拦截日志</button>
+  <button data-tab="proxy">代理 / 系统</button>
+</nav>
+
+<main>
+
+<!-- ============ 仪表盘 ============ -->
+<section id="tab-dash" class="on">
+  <h2>总览
+    <span class="spacer"></span>
+    <button class="btn sm" onclick="refreshAll()">刷新</button>
+    <button class="btn sm warn" onclick="openUnlock()">临时解锁</button>
+  </h2>
+  <div class="grid g3" id="metrics"></div>
+
+  <div class="grid g2" style="margin-top:14px">
+    <div class="card">
+      <h3 style="margin-top:0">最近拦截</h3>
+      <div id="recentBlocked"></div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">规则命中排行</h3>
+      <div id="ruleRank"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">会话信息</h3>
+    <table id="sessionInfo"></table>
+  </div>
+</section>
+
+<!-- ============ 规则 ============ -->
+<section id="tab-rules">
+  <h2>拦截规则
+    <span class="spacer"></span>
+    <input type="text" id="ruleFilter" placeholder="过滤：名称 / 关键词 / ID"
+           style="width:230px;flex:0 0 auto" oninput="renderRules()">
+    <button class="btn pri sm" onclick="openRule()">+ 新建规则</button>
+  </h2>
+  <div class="warnbox">
+    <b>规则默认检查全部字段</b>（URL、路径、参数、请求体、请求头、方法、主机、命令行），
+    改完立即生效（引擎热重载，无需重启）。<br>
+    关键词用 <code>substring</code> 匹配时，<code>delete</code> 会命中 <code>delete.php</code>、
+    <code>?delete=</code>、<code>deleted_at</code> —— 最后一种用「误报抑制」或
+    改用 <code>word</code> 模式。只有排误报时才需要在「高级」里限定字段。
+  </div>
+  <div class="card" style="padding:0"><table id="ruleTable"></table></div>
+</section>
+
+<!-- ============ 放行名单 ============ -->
+<section id="tab-allow">
+  <h2>放行名单
+    <span class="spacer"></span>
+    <button class="btn pri sm" onclick="openAllow()">+ 新建放行</button>
+  </h2>
+  <div class="warnbox">
+    放行名单按 <b>source</b>（url / path / query / body / headers / raw_cmd / any）
+    做正则匹配。命中后该字段<b>整段跳过检查</b>。用于靶场域名、已知安全的字段名。
+  </div>
+  <div class="card" style="padding:0"><table id="allowTable"></table></div>
+</section>
+
+<!-- ============ 测试台 ============ -->
+<section id="tab-console">
+  <h2>规则测试台</h2>
+  <div class="grid g2">
+    <div class="card">
+      <label>测试类型</label>
+      <select id="scanKind" onchange="onKindChange()">
+        <option value="text">纯文本 / 命令片段</option>
+        <option value="request">HTTP 请求（URL + body）</option>
+        <option value="curl">curl 命令行</option>
+      </select>
+
+      <div id="kindText">
+        <label>文本内容</label>
+        <textarea id="scanText" placeholder="http://127.0.0.1/1.php?delete=test.txt"></textarea>
+      </div>
+
+      <div id="kindRequest" style="display:none">
+        <label>Method</label>
+        <input type="text" id="scanMethod" value="GET">
+        <label>URL</label>
+        <input type="text" id="scanUrl" placeholder="http://127.0.0.1/delete.php?id=1">
+        <label>Body</label>
+        <textarea id="scanBody" placeholder="id=1&action=remove"></textarea>
+      </div>
+
+      <div id="kindCurl" style="display:none">
+        <label>curl 参数（不含 curl 本身）</label>
+        <textarea id="scanCurl" placeholder='--method GET --url "http://127.0.0.1/1.php?delete=test.txt"&#10;或者直接粘贴整条命令：curl -X POST http://x/api/remove -d "id=1"'></textarea>
+      </div>
+
+      <div class="row" style="margin-top:14px">
+        <label class="shrink" style="margin:0">
+          <input type="checkbox" id="scanLog" checked> 写入日志
+        </label>
+        <button class="btn pri" onclick="runScan()">执行检测</button>
+      </div>
+      <div class="hint">
+        改规则后可直接在这里验证效果。命中 <code>?</code> 显示完整 JSON。
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">检测结果</h3>
+      <pre id="scanOut">等待检测…</pre>
+      <div class="hint" id="scanVerdict"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 日志 ============ -->
+<section id="tab-events">
+  <h2>拦截日志
+    <span class="spacer"></span>
+    <input type="text" id="evSearch" placeholder="搜索目标 / 规则 / 理由"
+           style="width:210px;flex:0 0 auto" onkeydown="if(event.key==='Enter')loadEvents(0)">
+    <label class="shrink" style="margin:0;color:var(--fg2);font-size:12px">
+      <input type="checkbox" id="evBlocked" onchange="loadEvents(0)"> 只看拦截
+    </label>
+    <button class="btn sm" onclick="loadEvents(0)">查询</button>
+    <button class="btn sm danger" onclick="clearEvents()">清空</button>
+  </h2>
+  <div class="card" style="padding:0"><table id="evTable"></table></div>
+  <div class="pager">
+    <span class="info" id="evInfo"></span>
+    <button class="btn sm" onclick="evPage(-1)">上一页</button>
+    <button class="btn sm" onclick="evPage(1)">下一页</button>
+  </div>
+</section>
+
+<!-- ============ 代理 / 系统 ============ -->
+<section id="tab-proxy">
+  <h2>代理与全局设置</h2>
+
+  <div class="grid g2">
+    <div class="card">
+      <h3 style="margin-top:0">本地拦截代理</h3>
+      <div id="proxyState" class="hint" style="margin-bottom:10px"></div>
+      <label>监听端口</label>
+      <input type="number" id="proxyPort" value="8899">
+      <label class="shrink" style="margin-top:10px">
+        <input type="checkbox" id="proxyMitm"> 开启 MITM（拦截 HTTPS 内容，需导入 CA）
+      </label>
+      <label>上游代理（可选，链到 Burp）</label>
+      <div class="row">
+        <input type="text" id="proxyUpstream" placeholder="127.0.0.1">
+        <input type="number" id="proxyUpstreamPort" placeholder="8080" class="shrink" style="flex:0 0 110px">
+      </div>
+      <div class="row" style="margin-top:14px">
+        <button class="btn pri" onclick="proxyStart()">启动代理</button>
+        <button class="btn danger" onclick="proxyStop()">停止代理</button>
+      </div>
+      <div class="hint">
+        Burp 用法：Burp → Settings → Network → Upstream Proxy 填
+        <code>127.0.0.1:8899</code>，WAF 会拦掉 Burp 发出的 HTTP 请求。<br>
+        HTTPS 要么开 MITM，要么用 <code>burp/burp_waf.py</code> 扩展（更省事）。
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">全局设置</h3>
+      <label>拦截开关</label>
+      <select id="setEnabled">
+        <option value="true">开启 —— 检查并拦截（默认）</option>
+        <option value="false">暂停 —— 请求直接透传</option>
+      </select>
+      <label>拦截模式</label>
+      <select id="setMode">
+        <option value="block">block —— 正常拦截（默认）</option>
+        <option value="monitor">monitor —— 只记录不拦截</option>
+      </select>
+      <label>引擎故障时</label>
+      <select id="setFail">
+        <option value="closed">closed —— 拦截（保守，推荐）</option>
+        <option value="open">open —— 放行</option>
+      </select>
+      <label class="shrink" style="margin-top:10px">
+        <input type="checkbox" id="setHeaders"> 检查请求头
+      </label>
+      <label class="shrink">
+        <input type="checkbox" id="setLogAllowed"> 记录未拦截的请求（日志会变多）
+      </label>
+      <div class="row" style="margin-top:14px">
+        <button class="btn pri" onclick="saveSettings()">保存设置</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">CA 证书（MITM 用）</h3>
+    <div id="caInfo" class="hint">加载中…</div>
+    <div class="row" style="margin-top:12px">
+      <button class="btn" onclick="downloadCA()">下载 CA 证书</button>
+      <button class="btn" onclick="showCAHint()">导入说明</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">文件位置</h3>
+    <div id="paths" class="hint"></div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">关闭控制台</h3>
+    <div class="hint" style="margin-bottom:10px">
+      关闭后 curl 拦截仍生效（走本地文件判定），但无法再用此 UI。重新启动请双击 <code>start.bat</code>。
+    </div>
+    <button class="btn danger" onclick="shutdownConsole()">关闭 HuntGuard 控制台</button>
+  </div>
+</section>
+
+</main>
+</div>
+
+<!-- 规则编辑弹窗 -->
+<div class="mask" id="ruleMask">
+  <div class="modal">
+    <h2 id="ruleTitle">编辑规则</h2>
+    <input type="hidden" id="rId">
+    <div class="row">
+      <div><label>规则 ID</label><input type="text" id="rIdView" disabled></div>
+      <div><label>名称</label><input type="text" id="rName" placeholder="删除 / 销毁类操作"></div>
+    </div>
+    <div class="row">
+      <div><label>严重级别</label>
+        <select id="rSev">
+          <option value="critical">critical</option><option value="high">high</option>
+          <option value="medium" selected>medium</option><option value="low">low</option>
+          <option value="info">info</option>
+        </select></div>
+      <div><label>动作</label>
+        <select id="rAction"><option value="block">block 拦截</option>
+          <option value="monitor">monitor 仅记录</option></select></div>
+      <div><label>匹配方式</label>
+        <select id="rMode">
+          <option value="substring">substring 包含即命中</option>
+          <option value="word">word 词边界</option>
+          <option value="regex">regex 正则</option>
+        </select></div>
+    </div>
+
+    <label>关键词（每行一个；substring / word 模式下使用）</label>
+    <textarea id="rKeywords" placeholder="delete&#10;remove&#10;drop table"></textarea>
+
+    <label>正则（每行一个；regex 模式或作为补充匹配）</label>
+    <textarea id="rRegex" placeholder="\brm\s+-[a-zA-Z]*[rf]"></textarea>
+
+    <label>误报抑制 / exclude（每行一个正则，命中点前后 24 字符内匹配则忽略该命中）</label>
+    <textarea id="rExclude" style="min-height:60px" placeholder="deleted_at&#10;is_deleted"></textarea>
+
+    <label>备注</label>
+    <input type="text" id="rNote" placeholder="为什么要拦这条">
+
+    <details style="margin-top:14px">
+      <summary>高级：限定检查范围 / 字段</summary>
+      <div class="hint" style="margin:8px 0">
+        默认检查<b>全部字段</b>（URL、路径、参数、请求体、请求头、方法、主机、命令行）。
+        <b>只在这里缩小范围</b> —— 用于排误报，比如某个词只在请求头里才需要放行。
+        缩小范围会<b>减少拦截面</b>，漏勾的字段就查不到了。
+      </div>
+      <div class="chips" id="rSources"></div>
+      <label class="shrink" style="margin-top:10px">
+        <input type="checkbox" id="rFullScan" checked onchange="onFullScanToggle()"> 全部字段（推荐）
+      </label>
+    </details>
+
+    <div class="row" style="margin-top:12px">
+      <label class="shrink" style="margin:0"><input type="checkbox" id="rEnabled" checked> 启用</label>
+    </div>
+
+    <div class="foot">
+      <button class="btn" onclick="closeMask('ruleMask')">取消</button>
+      <button class="btn" onclick="testRuleDraft()">试一下</button>
+      <button class="btn pri" onclick="saveRule()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 放行编辑弹窗 -->
+<div class="mask" id="allowMask">
+  <div class="modal" style="width:min(600px,100%)">
+    <h2>放行名单条目</h2>
+    <div class="row">
+      <div><label>ID</label><input type="text" id="aIdView" disabled></div>
+      <div><label>作用字段 source</label>
+        <select id="aSource">
+          <option value="any">any 任意字段</option><option value="url">url</option>
+          <option value="path">path</option><option value="query">query</option>
+          <option value="body">body</option><option value="headers">headers</option>
+          <option value="raw_cmd">raw_cmd</option>
+        </select></div>
+    </div>
+    <label>正则 pattern</label>
+    <input type="text" id="aPattern" placeholder="deleted_at|is_deleted">
+    <label>备注</label>
+    <input type="text" id="aNote" placeholder="软删除字段，避免误报">
+    <div class="row" style="margin-top:12px">
+      <label class="shrink" style="margin:0"><input type="checkbox" id="aEnabled" checked> 启用</label>
+    </div>
+    <div class="foot">
+      <button class="btn" onclick="closeMask('allowMask')">取消</button>
+      <button class="btn pri" onclick="saveAllow()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 解锁弹窗 -->
+<div class="mask" id="unlockMask">
+  <div class="modal" style="width:min(520px,100%)">
+    <h2>临时解锁（逃生通道）</h2>
+    <div class="warnbox">
+      <b>解锁期间所有拦截规则失效</b>，命中只记录不阻止。窗口到期自动恢复上锁。
+      请只在你明确要测删除类接口时使用，并填写理由备查。
+    </div>
+    <label>时长（分钟）</label>
+    <input type="number" id="uMinutes" value="10" min="1" max="480">
+    <label>理由（会写入日志）</label>
+    <input type="text" id="uReason" placeholder="验证 /api/delete.php 的越权删除问题">
+    <div class="foot">
+      <button class="btn" onclick="closeMask('unlockMask')">取消</button>
+      <button class="btn warn" onclick="doUnlock()">开始解锁</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ====================================================================
+   HuntGuard 控制台前端（无依赖）
+   ==================================================================== */
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/`/g, "&#96;");
+
+/* 内插进 onclick="fn('VALUE')" 这种**单引号 JS 字符串**时专用。
+   esc() 把 ' 换成 &#39;（HTML 层面安全），但 onclick 属性值是
+   **先 HTML 解码、再当 JS 解析** —— &#39; 会变回 ' 从而闭合字符串，
+   后面就能接任意 JS。所以内插进 JS 字符串时必须做 JS 转义。
+   （实测发现的存储型注入面：共享/导入 rules.json 时，
+   规则名里带单引号即可注入。） */
+const jsq = (s) => String(s == null ? "" : s)
+  .replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/"/g, '\\"')
+  .replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/</g, "\\x3c");
+
+let STATE = { status: null, rules: [], allow: [], settings: {}, events: { total: 0, offset: 0, limit: 100 } };
+const SOURCES = ["url", "path", "query", "body", "headers", "method", "host", "raw_cmd"];
+
+/* ---------- 网络 ---------- */
+async function api(path, opts) {
+  // 带上 auth_token（如果服务端配置了）。token 由服务端注入页面
+  // （见 api.py 的 _inject_token）—— 早先 UI 完全不发这个头，
+  // 于是"按 README 开启 auth_token"会让整个控制台报废且无法从界面改回。
+  const headers = { "Content-Type": "application/json" };
+  if (window.__WAF_TOKEN) headers["X-Auth-Token"] = window.__WAF_TOKEN;
+  const res = await fetch(path, Object.assign({ headers: headers }, opts || {}));
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch (e) { data = { error: text }; }
+  if (res.status === 401) {
+    throw new Error("鉴权失败：控制台配置了 auth_token，但页面没拿到。" +
+                    "请刷新页面；仍不行就检查 data/config.json 的 auth_token");
+  }
+  if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+  return data;
+}
+const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(body || {}) });
+
+function toast(msg, kind) {
+  const el = document.createElement("div");
+  if (kind) el.className = kind;
+  el.textContent = msg;
+  $("toast").appendChild(el);
+  setTimeout(() => el.remove(), kind === "err" ? 6000 : 3200);
+}
+
+/* ---------- 标签页 ---------- */
+$("nav").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-tab]");
+  if (!btn) return;
+  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("on", b === btn));
+  document.querySelectorAll("main section").forEach(s =>
+    s.classList.toggle("on", s.id === "tab-" + btn.dataset.tab));
+  if (btn.dataset.tab === "events") loadEvents(0);
+});
+function goTab(name) { document.querySelector(`nav button[data-tab="${name}"]`).click(); }
+
+/* ---------- 状态 ---------- */
+async function refreshStatus() {
+  try {
+    const st = await api("/api/status");
+    STATE.status = st;
+    const dot = $("dot");
+    const unlocked = st.unlock_remaining > 0;
+    const on = st.intercept_enabled && st.active;
+    dot.className = "dot" + (on ? (unlocked ? " mon" : "") : " off");
+    $("ver").textContent = "v" + st.version;
+
+    renderSwitch(st, on, unlocked);
+
+    const s = st.stats || {};
+    $("headStats").innerHTML = [
+      `<span class="pill ${on ? 'ok' : 'crit'}">${on ? (unlocked ? '已解锁' : '拦截中') : '未启用'}</span>`,
+      `<span class="pill">规则 <b>${st.rules_enabled}</b>/${st.rules_total}</span>`,
+      `<span class="pill">今日 <b>${s.today || 0}</b></span>`,
+      `<span class="pill crit">今日拦截 <b>${s.today_blocked || 0}</b></span>`,
+      `<span class="pill">代理 <b>${st.proxy && st.proxy.running ? (st.proxy.host + ':' + st.proxy.port) : '未启动'}</b></span>`
+    ].join("");
+
+    const banner = $("unlockBanner");
+    if (unlocked) {
+      banner.classList.add("show");
+      $("unlockLeft").textContent = fmtSec(st.unlock_remaining);
+      $("unlockReason").textContent = st.unlock_reason ? "（" + st.unlock_reason + "）" : "";
+    } else {
+      banner.classList.remove("show");
+    }
+    renderMetrics();
+  } catch (e) {
+    $("dot").className = "dot off";
+    $("headStats").innerHTML = `<span class="pill crit">控制台离线：${esc(e.message)}</span>`;
+    $("switchBar").className = "paused";
+    $("switchText").textContent = "控制台离线";
+    $("switchDesc").textContent = "";
+  }
+}
+
+/* 总开关渲染：这是"我开了才生效"的核心指示 */
+function renderSwitch(st, on, unlocked) {
+  const bar = $("switchBar");
+  const box = $("interceptSwitch");
+  const detail = st.active_detail || {};
+
+  bar.className = on ? "on" : "paused";
+  box.checked = !!st.intercept_enabled;
+  box.disabled = false;
+
+  if (on) {
+    $("switchText").textContent = unlocked ? "拦截已开启（但正在临时解锁）" : "拦截已开启";
+    $("switchDesc").textContent = unlocked
+      ? "解锁窗口内所有请求放行，到期自动恢复"
+      : "curl / Burp / 代理的命中请求会被拦下";
+  } else if (st.intercept_enabled && !st.active) {
+    $("switchText").textContent = "拦截未生效 —— 控制台未运行";
+    $("switchDesc").textContent = "开关是开的，但检测不到控制台心跳。重启控制台即可。";
+  } else {
+    $("switchText").textContent = "拦截已暂停";
+    $("switchDesc").textContent = "所有请求直接透传，不检查、不记录";
+  }
+
+  $("activeDetail").innerHTML = st.active
+    ? `心跳 <b>${detail.age_sec != null ? detail.age_sec.toFixed(1) + 's' : 'ok'}</b>`
+    : `心跳 <b>无</b>`;
+}
+
+async function toggleIntercept(enabled) {
+  const box = $("interceptSwitch");
+  box.disabled = true;
+  try {
+    await post("/api/intercept", { action: enabled ? "on" : "off" });
+    toast(enabled ? "拦截已开启 —— 命中敏感词将被拦下"
+                  : "拦截已暂停 —— 请求直接透传", enabled ? "good" : "err");
+    await refreshStatus();
+  } catch (e) {
+    toast("切换失败：" + e.message, "err");
+    box.checked = !enabled;
+  } finally {
+    box.disabled = false;
+  }
+}
+
+function fmtSec(sec) {
+  sec = Math.max(0, Math.round(sec));
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return m > 0 ? `${m} 分 ${s} 秒` : `${s} 秒`;
+}
+
+function renderMetrics() {
+  const st = STATE.status; if (!st) return;
+  const s = st.stats || {};
+  const proxy = st.proxy || {};
+  $("metrics").innerHTML = `
+    <div class="metric ${s.today_blocked ? 'hot' : ''}">
+      <div class="k">今日拦截</div>
+      <div class="v">${s.today_blocked || 0} <small>/ ${s.today || 0} 次请求</small></div>
+    </div>
+    <div class="metric">
+      <div class="k">累计拦截</div>
+      <div class="v">${s.blocked || 0} <small>/ ${s.total || 0}</small></div>
+    </div>
+    <div class="metric ${st.mode === 'monitor' ? '' : 'cool'}">
+      <div class="k">拦截模式</div>
+      <div class="v" style="font-size:16px">${st.mode === 'monitor' ? 'monitor 只记录' : 'block 拦截'}</div>
+    </div>
+    <div class="metric">
+      <div class="k">启用规则</div>
+      <div class="v">${st.rules_enabled}<small>/${st.rules_total}</small></div>
+    </div>
+    <div class="metric">
+      <div class="k">代理连接</div>
+      <div class="v">${proxy.connections || 0} <small>${proxy.running ? '运行中' : '未启动'}</small></div>
+    </div>
+    <div class="metric">
+      <div class="k">运行时长</div>
+      <div class="v" style="font-size:16px">${fmtUptime(st.uptime_sec)}</div>
+    </div>`;
+
+  const tools = (s.by_tool || []).map(t =>
+    `<span class="pill">${esc(t.tool || '未知')} <b>${t.n}</b></span>`).join(" ");
+  $("sessionInfo").innerHTML = `
+    <tr><th style="width:150px">进程</th><td class="mono">PID ${st.pid}</td></tr>
+    <tr><th>规则文件</th><td class="mono">${esc(st.rules_file)}</td></tr>
+    <tr><th>日志库</th><td class="mono">${esc(st.db_file)}</td></tr>
+    <tr><th>故障策略</th><td class="mono">fail_mode=${esc(st.fail_mode)}</td></tr>
+    <tr><th>放行条目</th><td>${st.allowlist_total}</td></tr>
+    <tr><th>流量来源</th><td>${tools || '<span class="hint">暂无</span>'}</td></tr>`;
+}
+function fmtUptime(sec) {
+  sec = Math.round(sec || 0);
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+  return h > 0 ? `${h} 小时 ${m} 分` : `${m} 分 ${sec % 60} 秒`;
+}
+
+async function refreshDash() {
+  try {
+    const data = await api("/api/events?limit=8&blocked=1");
+    $("recentBlocked").innerHTML = data.items.length ? `<table>
+      <tr><th>时间</th><th>来源</th><th>目标</th><th>规则</th></tr>
+      ${data.items.map(it => `<tr>
+        <td class="mono">${esc((it.ts_text || "").slice(11))}</td>
+        <td><span class="tag">${esc(it.tool)}</span></td>
+        <td class="mono" style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+            title="${esc(it.target)}">${esc(it.target)}</td>
+        <td class="mono">${esc((it.rule_ids || []).join(","))}</td></tr>`).join("")}
+      </table>` : '<div class="empty">暂无拦截记录</div>';
+  } catch (e) {
+    $("recentBlocked").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`;
+  }
+  const st = STATE.status;
+  const rank = (st && st.stats && st.stats.by_rule) || [];
+  $("ruleRank").innerHTML = rank.length ? `<table>
+      <tr><th>规则</th><th style="width:70px">次数</th></tr>
+      ${rank.map(r => `<tr><td class="mono">${esc(r.rule_id)}</td><td>${r.n}</td></tr>`).join("")}
+    </table>` : '<div class="empty">暂无数据</div>';
+}
+
+/* ---------- 规则 ---------- */
+async function loadRules() {
+  const data = await api("/api/rules");
+  STATE.rules = data.rules || [];
+  STATE.allow = data.allowlist || [];
+  STATE.settings = data.settings || {};
+  renderRules(); renderAllow(); fillSettings();
+}
+
+function renderRules() {
+  const filter = ($("ruleFilter").value || "").toLowerCase();
+  const rows = STATE.rules.filter(r => {
+    if (!filter) return true;
+    const blob = (r.id + " " + r.name + " " + (r.keywords || []).join(" ") + " " +
+                  (r.regex || []).join(" ") + " " + (r.note || "")).toLowerCase();
+    return blob.includes(filter);
+  });
+  const t = $("ruleTable");
+  if (!rows.length) {
+    t.innerHTML = `<tr><td class="empty">没有匹配的规则。点击右上角「新建规则」添加。</td></tr>`;
+    return;
+  }
+  t.innerHTML = `
+    <tr><th style="width:44px">启用</th><th style="width:66px">ID</th><th>名称</th>
+        <th style="width:86px">级别</th><th style="width:92px">动作</th>
+        <th>匹配内容</th><th style="width:130px">操作</th></tr>
+    ${rows.map(r => {
+      const pats = []
+        .concat((r.keywords || []).slice(0, 6).map(k => `<span class="tag">${esc(k)}</span>`))
+        .concat((r.regex || []).slice(0, 3).map(x => `<span class="tag mono">${esc(x)}</span>`));
+      const more = (r.keywords || []).length + (r.regex || []).length - pats.length;
+      const srcCount = (r.sources || []).length;
+      const scope = srcCount === 0 || srcCount >= SOURCES.length
+        ? "全部字段" : `${srcCount} 个字段`;
+      return `<tr class="${r.enabled ? '' : 'tag off'}">
+        <td><label class="sw"><input type="checkbox" ${r.enabled ? 'checked' : ''}
+             onchange="toggleRule('${esc(r.id)}', this.checked)"><span></span></label></td>
+        <td class="mono">${esc(r.id)}</td>
+        <td>${esc(r.name)}${r.note ? `<div class="hint">${esc(r.note)}</div>` : ""}</td>
+        <td><span class="tag ${esc(r.severity)}">${esc(r.severity)}</span></td>
+        <td><span class="tag ${esc(r.action)}">${esc(r.action)}</span></td>
+        <td>${pats.join(" ")}${more > 0 ? ` <span class="hint">+${more}</span>` : ""}
+            <div class="hint">${esc(r.match_mode)} · ${esc(scope)}</div></td>
+        <td>
+          <button class="btn sm" onclick="openRule('${jsq(r.id)}')">编辑</button>
+          <button class="btn sm danger" onclick="delRule('${jsq(r.id)}', '${jsq(r.name)}')">删除</button>
+        </td></tr>`;
+    }).join("")}`;
+}
+
+async function toggleRule(id, enabled) {
+  try {
+    await post("/api/rules/toggle", { id, enabled });
+    const r = STATE.rules.find(x => x.id === id);
+    if (r) r.enabled = enabled;
+    toast((enabled ? "已启用 " : "已停用 ") + id, "good");
+    refreshStatus();
+  } catch (e) { toast("操作失败：" + e.message, "err"); }
+}
+
+async function delRule(id, name) {
+  if (!confirm(`确定删除规则 ${id}「${name}」？\n\n删除后该关键词不再拦截。`)) return;
+  try {
+    await post("/api/rules/delete", { id });
+    toast("已删除 " + id, "good");
+    await loadRules(); refreshStatus();
+  } catch (e) { toast("删除失败：" + e.message, "err"); }
+}
+
+function openRule(id) {
+  const r = id ? STATE.rules.find(x => x.id === id) : null;
+  $("ruleTitle").textContent = r ? "编辑规则 " + r.id : "新建规则";
+  $("rId").value = r ? r.id : "";
+  $("rIdView").value = r ? r.id : "（保存后自动生成）";
+  $("rName").value = r ? r.name : "";
+  $("rSev").value = r ? r.severity : "critical";
+  $("rAction").value = r ? r.action : "block";
+  $("rMode").value = r ? r.match_mode : "substring";
+  $("rKeywords").value = r ? (r.keywords || []).join("\n") : "";
+  $("rRegex").value = r ? (r.regex || []).join("\n") : "";
+  $("rExclude").value = r ? (r.exclude || []).join("\n") : "";
+  $("rNote").value = r ? (r.note || "") : "";
+  $("rEnabled").checked = r ? r.enabled : true;
+
+  // 字段范围：默认全部。只有规则显式缩小过范围才展示细选。
+  const ruleSources = r ? (r.sources || []) : [];
+  const isFull = !r || ruleSources.length === 0 || ruleSources.length >= SOURCES.length;
+  $("rFullScan").checked = isFull;
+  const active = new Set(isFull ? SOURCES : ruleSources);
+  $("rSources").innerHTML = SOURCES.map(s =>
+    `<label class="chip ${active.has(s) ? 'on' : ''}">
+       <input type="checkbox" value="${s}" ${active.has(s) ? 'checked' : ''}
+              onchange="this.closest('label').classList.toggle('on', this.checked)">${s}</label>`).join("");
+  onFullScanToggle();
+  $("ruleMask").classList.add("show");
+}
+
+function onFullScanToggle() {
+  const full = $("rFullScan").checked;
+  $("rSources").style.opacity = full ? "0.45" : "1";
+  $("rSources").querySelectorAll("input").forEach(i => { i.disabled = full; });
+}
+
+function collectRule() {
+  const lines = (v) => v.split("\n").map(x => x.trim()).filter(Boolean);
+  const full = $("rFullScan").checked;
+  // 全字段时提交空数组 —— 引擎把「空 sources」解释为全部字段，
+  // 这样即使以后新增了扫描维度，老规则也自动覆盖到。
+  const sources = full ? [] :
+    Array.from($("rSources").querySelectorAll("input:checked")).map(i => i.value);
+  if (!full && !sources.length) {
+    // 一个都没勾 = 这条规则永不生效，几乎肯定是误操作
+    throw new Error("至少选一个字段，或勾上「全部字段」");
+  }
+  return {
+    id: $("rId").value || undefined,
+    name: $("rName").value.trim(),
+    enabled: $("rEnabled").checked,
+    severity: $("rSev").value,
+    action: $("rAction").value,
+    match_mode: $("rMode").value,
+    keywords: lines($("rKeywords").value),
+    regex: lines($("rRegex").value),
+    exclude: lines($("rExclude").value),
+    sources: sources,
+    note: $("rNote").value.trim()
+  };
+}
+
+async function saveRule() {
+  let rule;
+  try {
+    rule = collectRule();
+  } catch (e) {
+    toast(e.message, "err");
+    return;
+  }
+  if (!rule.name) { toast("请填写规则名称", "err"); return; }
+  if (!rule.keywords.length && !rule.regex.length) {
+    toast("至少要有一个关键词或正则", "err"); return;
+  }
+  try {
+    await post("/api/rules", { rule });
+    toast("规则已保存（立即生效）", "good");
+    closeMask("ruleMask");
+    await loadRules(); refreshStatus();
+  } catch (e) { toast("保存失败：" + e.message, "err"); }
+}
+
+async function testRuleDraft() {
+  let rule;
+  try {
+    rule = collectRule();
+  } catch (e) {
+    toast(e.message, "err");
+    return;
+  }
+  const sample = prompt("输入一段测试内容，看看这条规则会不会命中：",
+                        "http://127.0.0.1/1.php?delete=test.txt");
+  if (sample == null) return;
+  const hits = [];
+  const target = sample.toLowerCase();
+  (rule.keywords || []).forEach(k => {
+    if (target.includes(k.toLowerCase())) hits.push({ type: "keyword", value: k });
+  });
+  (rule.regex || []).forEach(rx => {
+    try { if (new RegExp(rx, "i").test(sample)) hits.push({ type: "regex", value: rx }); }
+    catch (e) { hits.push({ type: "regex错误", value: rx + " → " + e.message }); }
+  });
+  const excluded = (rule.exclude || []).some(rx => {
+    try { return new RegExp(rx, "i").test(sample); } catch (e) { return false; }
+  });
+  toast(`本地近似匹配：${hits.length} 命中` +
+        (excluded ? "（但被 exclude 抑制）" : "") + "\n" +
+        hits.map(h => h.type + ": " + h.value).join("\n"),
+        hits.length && !excluded ? "err" : "good");
+}
+
+/* ---------- 放行名单 ---------- */
+function renderAllow() {
+  const t = $("allowTable");
+  if (!STATE.allow.length) {
+    t.innerHTML = `<tr><td class="empty">暂无放行条目</td></tr>`;
+    return;
+  }
+  t.innerHTML = `
+    <tr><th style="width:44px">启用</th><th style="width:66px">ID</th>
+        <th style="width:90px">字段</th><th>正则</th><th>备注</th><th style="width:130px">操作</th></tr>
+    ${STATE.allow.map(a => `<tr class="${a.enabled ? '' : 'tag off'}">
+      <td><label class="sw"><input type="checkbox" ${a.enabled ? 'checked' : ''}
+           onchange="toggleAllow('${esc(a.id)}', this.checked)"><span></span></label></td>
+      <td class="mono">${esc(a.id)}</td>
+      <td><span class="tag">${esc(a.source)}</span></td>
+      <td class="mono">${esc(a.pattern)}</td>
+      <td class="hint">${esc(a.note)}</td>
+      <td>
+        <button class="btn sm" onclick="openAllow('${jsq(a.id)}')">编辑</button>
+        <button class="btn sm danger" onclick="delAllow('${jsq(a.id)}')">删除</button>
+      </td></tr>`).join("")}`;
+}
+
+function openAllow(id) {
+  const a = id ? STATE.allow.find(x => x.id === id) : null;
+  $("aIdView").value = a ? a.id : "（保存后自动生成）";
+  $("aSource").value = a ? a.source : "any";
+  $("aPattern").value = a ? a.pattern : "";
+  $("aNote").value = a ? (a.note || "") : "";
+  $("aEnabled").checked = a ? a.enabled : true;
+  $("allowMask").dataset.id = a ? a.id : "";
+  $("allowMask").classList.add("show");
+}
+
+async function saveAllow() {
+  const entry = {
+    id: $("allowMask").dataset.id || undefined,
+    enabled: $("aEnabled").checked,
+    source: $("aSource").value,
+    pattern: $("aPattern").value.trim(),
+    note: $("aNote").value.trim()
+  };
+  if (!entry.pattern) { toast("请填写正则 pattern", "err"); return; }
+  try {
+    await post("/api/allow", { allow: entry });
+    toast("放行条目已保存", "good");
+    closeMask("allowMask");
+    await loadRules(); refreshStatus();
+  } catch (e) { toast("保存失败：" + e.message, "err"); }
+}
+
+async function toggleAllow(id, enabled) {
+  const a = STATE.allow.find(x => x.id === id);
+  if (!a) return;
+  try {
+    await post("/api/allow", { allow: Object.assign({}, a, { enabled }) });
+    a.enabled = enabled;
+    toast((enabled ? "已启用 " : "已停用 ") + id, "good");
+    refreshStatus();
+  } catch (e) { toast("操作失败：" + e.message, "err"); }
+}
+
+async function delAllow(id) {
+  if (!confirm("确定删除放行条目 " + id + "？")) return;
+  await post("/api/allow/delete", { id });
+  toast("已删除 " + id, "good");
+  await loadRules(); refreshStatus();
+}
+
+/* ---------- 设置 ---------- */
+function fillSettings() {
+  const s = STATE.settings || {};
+  $("setEnabled").value = (s.enabled === false || s.enabled === "false") ? "false" : "true";
+  $("setMode").value = s.mode || "block";
+  $("setFail").value = s.fail_mode || "closed";
+  $("setHeaders").checked = s.scan_headers !== false;
+  $("setLogAllowed").checked = !!s.log_allowed;
+}
+async function saveSettings() {
+  try {
+    await post("/api/settings", { settings: {
+      enabled: $("setEnabled").value === "true",
+      mode: $("setMode").value,
+      fail_mode: $("setFail").value,
+      scan_headers: $("setHeaders").checked,
+      log_allowed: $("setLogAllowed").checked
+    }});
+    toast("设置已保存（立即生效）", "good");
+    await loadRules(); refreshStatus();
+  } catch (e) { toast("保存失败：" + e.message, "err"); }
+}
+
+/* ---------- 测试台 ---------- */
+function onKindChange() {
+  const kind = $("scanKind").value;
+  $("kindText").style.display = kind === "text" ? "" : "none";
+  $("kindRequest").style.display = kind === "request" ? "" : "none";
+  $("kindCurl").style.display = kind === "curl" ? "" : "none";
+}
+
+async function runScan() {
+  const kind = $("scanKind").value;
+  let payload;
+  if (kind === "request") {
+    payload = { kind: "request", method: $("scanMethod").value || "GET",
+                url: $("scanUrl").value, body: $("scanBody").value };
+  } else if (kind === "curl") {
+    let raw = $("scanCurl").value.trim();
+    if (raw.toLowerCase().startsWith("curl")) raw = raw.slice(4).trim();
+    payload = { kind: "curl", argv: splitArgs(raw) };
+  } else {
+    payload = { kind: "text", text: $("scanText").value };
+  }
+  const text = (payload.url || payload.text || (payload.argv || []).join(" "));
+  if (!text) { toast("请输入要检测的内容", "err"); return; }
+  payload.log = $("scanLog").checked;
+
+  try {
+    const data = await post("/api/scan", payload);
+    const pre = $("scanOut");
+    pre.textContent = JSON.stringify(data, null, 2);
+    pre.className = data.blocked ? "blocked" : "allowed";
+    $("scanVerdict").innerHTML = data.blocked
+      ? `<span class="hit">■ 会被拦截</span> —— ${esc(data.reason)}，命中规则 ${esc((data.hits||[]).map(h=>h.rule_id).filter((v,i,a)=>a.indexOf(v)===i).join(","))}`
+      : `<span class="ok">■ 会放行</span> —— ${esc(data.reason)}` +
+        (data.hits && data.hits.length ? `（有 ${data.hits.length} 条记录级命中）` : "");
+    refreshStatus();
+  } catch (e) {
+    $("scanOut").textContent = "错误：" + e.message;
+    $("scanOut").className = "blocked";
+  }
+}
+
+/* 简化的 shell 参数切分（支持引号） */
+function splitArgs(str) {
+  const out = []; let cur = ""; let quote = null;
+  for (let i = 0; i < str.length; i++) {
+    const c = str[i];
+    if (quote) {
+      if (c === quote) quote = null; else cur += c;
+    } else if (c === '"' || c === "'") { quote = c; }
+    else if (/\s/.test(c)) { if (cur) { out.push(cur); cur = ""; } }
+    else cur += c;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+/* ---------- 日志 ---------- */
+async function loadEvents(offset) {
+  const limit = 50;
+  if (offset === 0) STATE.events.offset = 0;
+  const params = new URLSearchParams({
+    limit, offset: Math.max(0, STATE.events.offset),
+    blocked: $("evBlocked").checked ? "1" : "0",
+    q: $("evSearch").value.trim()
+  });
+  try {
+    const data = await api("/api/events?" + params.toString());
+    STATE.events = { total: data.total, offset: Math.max(0, STATE.events.offset), limit };
+    const t = $("evTable");
+    if (!data.items.length) {
+      t.innerHTML = `<tr><td class="empty">没有日志记录</td></tr>`;
+    } else {
+      t.innerHTML = `
+        <tr><th style="width:140px">时间</th><th style="width:66px">类型</th>
+            <th style="width:70px">方法</th><th>目标</th><th style="width:150px">命中规则</th>
+            <th style="width:80px">来源</th></tr>
+        ${data.items.map(it => `<tr>
+          <td class="mono">${esc(it.ts_text)}</td>
+          <td>${it.blocked
+              ? '<span class="tag block">拦截</span>'
+              : (it.unlocked ? '<span class="tag monitor">解锁放行</span>' : '<span class="tag">放行</span>')}</td>
+          <td class="mono">${esc(it.method || "-")}</td>
+          <td class="mono" style="max-width:520px;word-break:break-all">
+            ${esc(it.target)}
+            <details><summary>详情</summary>
+              <pre style="max-height:280px">${esc(JSON.stringify(it.detail_json, null, 2))}</pre>
+            </details></td>
+          <td class="mono">${esc((it.rule_ids || []).join(",") || "-")}</td>
+          <td><span class="tag">${esc(it.tool)}</span></td></tr>`).join("")}`;
+    }
+    $("evInfo").textContent =
+      `共 ${data.total} 条，当前 ${STATE.events.offset + 1}-${Math.min(STATE.events.offset + limit, data.total)}`;
+  } catch (e) { toast("日志加载失败：" + e.message, "err"); }
+}
+function evPage(dir) {
+  const next = STATE.events.offset + dir * 50;
+  if (next < 0 || next >= STATE.events.total) return;
+  STATE.events.offset = next;
+  loadEvents(next);
+}
+async function clearEvents() {
+  if (!confirm("确定清空所有日志？此操作不可撤销。")) return;
+  await post("/api/events/clear", {});
+  toast("日志已清空", "good");
+  loadEvents(0); refreshStatus();
+}
+
+/* ---------- 解锁 ---------- */
+function openUnlock() { $("unlockMask").classList.add("show"); }
+async function doUnlock() {
+  const minutes = parseFloat($("uMinutes").value || "10");
+  const reason = $("uReason").value.trim();
+  if (!reason) { toast("请填写解锁理由（会写入日志）", "err"); return; }
+  try {
+    await post("/api/unlock", { minutes, reason });
+    toast(`已解锁 ${minutes} 分钟\n理由：${reason}\n到期自动上锁。`, "err");
+    closeMask("unlockMask");
+    refreshStatus();
+  } catch (e) { toast("解锁失败：" + e.message, "err"); }
+}
+async function lockNow() {
+  await post("/api/lock", {});
+  toast("已立即上锁", "good");
+  refreshStatus();
+}
+
+/* ---------- 代理 ---------- */
+async function loadProxy() {
+  try {
+    const st = await api("/api/proxy");
+    $("proxyState").innerHTML = st.running
+      ? `<span class="ok">● 运行中</span> —— ${esc(st.host)}:${st.port}
+         ${st.mitm ? '<span class="tag monitor">MITM</span>' : ''}
+         ${st.upstream ? `<span class="tag">上游 ${esc(st.upstream)}</span>` : ''}
+         <br>已处理 ${st.connections} 个连接，拦截 ${st.blocked} 次`
+      : '<span style="color:var(--fg2)">○ 未启动</span>';
+    if (st.port) $("proxyPort").value = st.port;
+    if (st.upstream) {
+      const parts = st.upstream.split(":");
+      $("proxyUpstream").value = parts[0] || "";
+      $("proxyUpstreamPort").value = parts[1] || "";
+    }
+    $("proxyMitm").checked = !!st.mitm;
+  } catch (e) { $("proxyState").textContent = "状态获取失败：" + e.message; }
+}
+async function proxyStart() {
+  try {
+    const body = {
+      action: "start",
+      mitm: $("proxyMitm").checked,
+      upstream: $("proxyUpstream").value.trim() || null,
+      upstream_port: parseInt($("proxyUpstreamPort").value || "0", 10) || null
+    };
+    await post("/api/proxy", body);
+    toast("代理已启动", "good");
+    loadProxy(); refreshStatus();
+  } catch (e) { toast("启动失败：" + e.message, "err"); }
+}
+async function proxyStop() {
+  try { await post("/api/proxy", { action: "stop" }); toast("代理已停止", "good"); loadProxy(); refreshStatus(); }
+  catch (e) { toast("停止失败：" + e.message, "err"); }
+}
+
+/* ---------- CA ---------- */
+async function loadCA() {
+  try {
+    const data = await api("/api/ca");
+    $("caInfo").innerHTML = data.available
+      ? `证书路径：<span class="mono">${esc(data.cert)}</span><br>${esc(data.hint)}`
+      : `不可用：${esc(data.hint || data.error || "未知原因")}`;
+  } catch (e) { $("caInfo").textContent = "获取失败：" + e.message; }
+}
+function downloadCA() { window.open("/api/ca/download", "_blank"); }
+function showCAHint() {
+  alert("导入方法：\n\n" +
+        "【Windows 系统级】双击 crt 文件 → 安装证书 → 本地计算机 → " +
+        "将所有的证书都放入下列存储 → 受信任的根证书颁发机构\n\n" +
+        "【Firefox】设置 → 隐私与安全 → 证书 → 查看证书 → 导入 → 勾选信任此 CA\n\n" +
+        "【curl】curl --cacert <ca.crt 路径> https://目标\n\n" +
+        "【Burp】其实不用导入 CA，直接加载 burp/burp_waf.py 扩展即可。");
+}
+
+/* ---------- 系统 ---------- */
+async function loadPaths() {
+  const st = STATE.status; if (!st) return;
+  $("paths").innerHTML = `
+    安装目录：<span class="mono">${esc(st.root)}</span><br>
+    规则文件：<span class="mono">${esc(st.rules_file)}</span>（手动编辑也会自动热重载）<br>
+    日志库：<span class="mono">${esc(st.db_file)}</span>`;
+}
+async function shutdownConsole() {
+  if (!confirm("确定关闭 HuntGuard 控制台？\n\n提示：curl 拦截依赖本地规则文件，仍会生效；\n" +
+               "但 Burp 扩展与代理需要重新启动控制台后才会恢复。")) return;
+  await post("/api/shutdown", {});
+  document.body.innerHTML =
+    '<div style="padding:60px;text-align:center;color:var(--fg2);font:14px system-ui">' +
+    'HuntGuard 控制台已关闭。<br><br>重新启动请双击 start.bat</div>';
+}
+
+/* ---------- 通用 ---------- */
+function closeMask(id) { $(id).classList.remove("show"); }
+document.querySelectorAll(".mask").forEach(m => {
+  m.addEventListener("mousedown", (e) => { if (e.target === m) m.classList.remove("show"); });
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") document.querySelectorAll(".mask.show").forEach(m => m.classList.remove("show"));
+});
+
+async function refreshAll() {
+  await refreshStatus();
+  await Promise.all([loadRules(), refreshDash(), loadProxy(), loadCA()]);
+  loadPaths();
+}
+
+/* ---------- 主题 ---------- */
+const THEMES = ["dark", "light", "green", "ocean"];
+const THEME_KEY = "agentwaf.theme";
+
+function applyTheme(name) {
+  if (THEMES.indexOf(name) < 0) name = "dark";
+  // dark 是 :root 默认值，不需要 data-theme 属性
+  if (name === "dark") {
+    document.documentElement.removeAttribute("data-theme");
+  } else {
+    document.documentElement.setAttribute("data-theme", name);
+  }
+  document.querySelectorAll(".theme-dot").forEach(function (b) {
+    b.setAttribute("aria-pressed",
+                   b.getAttribute("data-theme") === name ? "true" : "false");
+  });
+  try { localStorage.setItem(THEME_KEY, name); } catch (e) { /* 隐私模式 */ }
+}
+
+function initTheme() {
+  var saved = null;
+  try { saved = localStorage.getItem(THEME_KEY); } catch (e) { /* 忽略 */ }
+  // 没存过就跟随系统：系统是浅色就用浅色
+  if (!saved && window.matchMedia &&
+      window.matchMedia("(prefers-color-scheme: light)").matches) {
+    saved = "light";
+  }
+  applyTheme(saved || "dark");
+  document.querySelectorAll(".theme-dot").forEach(function (b) {
+    b.addEventListener("click", function () {
+      applyTheme(b.getAttribute("data-theme"));
+    });
+  });
+}
+
+/* ---------- 启动 ---------- */
+initTheme();
+refreshAll();
+setInterval(refreshStatus, 5000);
+</script>
+</body>
+</html>

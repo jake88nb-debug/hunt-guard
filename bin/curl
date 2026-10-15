@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# HuntGuard curl 拦截器 (Git Bash / WSL / Linux)
+#
+# 设计要点：
+#   1. 先做一次极快的"开关"判断（只看心跳文件，不启 Python）。
+#      WAF 没开时直接 exec 真实 curl —— 零额外开销、零干扰。
+#   2. WAF 开着才交给 Python shim 做规则匹配。
+#   3. Python / curl 路径优先用安装时自动探测的结果（data/env.sh），
+#      探测不到再走 PATH / 常见位置 —— 保证"下载即用"。
+#
+# 安装：wafctl install-path（会写 BASH_ENV，覆盖非交互 Git Bash）
+#      或 source scripts/install_shim.sh
+
+WAF_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WAF_BIN="$WAF_ROOT/bin"
+HEARTBEAT="$WAF_ROOT/data/run/active.json"
+STALE_AFTER=20
+
+# ---- 加载自动探测结果（如果安装时生成过）----
+if [ -f "$WAF_ROOT/data/env.sh" ]; then
+  . "$WAF_ROOT/data/env.sh" 2>/dev/null
+fi
+
+# ---- 找真实 curl（跳过我们自己的目录，避免递归）----
+_find_real_curl() {
+  if [ -n "${WAF_CURL:-}" ] && [ -x "${WAF_CURL}" ]; then
+    printf '%s\n' "$WAF_CURL"; return 0
+  fi
+  local dir
+  local IFS=:
+  for dir in $PATH; do
+    [ -z "$dir" ] && continue
+    case "$dir" in
+      "$WAF_BIN"|"$WAF_BIN"/) continue ;;
+    esac
+    if [ -x "$dir/curl" ] && [ ! -d "$dir/curl" ]; then
+      printf '%s\n' "$dir/curl"; return 0
+    fi
+    if [ -x "$dir/curl.exe" ] && [ ! -d "$dir/curl.exe" ]; then
+      printf '%s\n' "$dir/curl.exe"; return 0
+    fi
+  done
+  for dir in /mingw64/bin /usr/bin /bin /c/Windows/System32; do
+    [ -x "$dir/curl.exe" ] && { printf '%s\n' "$dir/curl.exe"; return 0; }
+    [ -x "$dir/curl" ] && { printf '%s\n' "$dir/curl"; return 0; }
+  done
+  return 1
+}
+
+# ---- 极快开关判断：心跳文件是否新鲜 ----
+_waf_active() {
+  [ "${WAF_ALWAYS_OFF:-}" = "1" ] && return 1
+  [ "${WAF_ALWAYS_ON:-}" = "1" ] && return 0
+  [ "${WAF_DISABLE:-}" = "1" ] && return 1
+  [ -f "$HEARTBEAT" ] || return 1
+  local now mt
+  now=$(date +%s 2>/dev/null) || return 1
+  # 心跳 mtime：GNU stat 用 -c %Y，BSD/macOS stat 用 -f %m。
+  # 早先只写了 GNU 形式 —— macOS 上 stat 直接失败 → 函数返回 1
+  # → _waf_active 恒假 → **永不拦截**（静默 fail-open），
+  # 而 README 写着 macOS 可用，等于给个假的安心。
+  #
+  # 两种都试，但**必须校验结果是纯数字**：GNU 的 stat 也接受 -f，
+  # 只是含义不同（显示文件系统信息），会成功返回一堆非数字文本 ——
+  # 不校验的话算术比较会报错，行为又变得不可预期。
+  mt=$(stat -c %Y "$HEARTBEAT" 2>/dev/null)
+  case "$mt" in
+    ''|*[!0-9]*) mt=$(stat -f %m "$HEARTBEAT" 2>/dev/null) ;;
+  esac
+  case "$mt" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ $((now - mt)) -le "$STALE_AFTER" ]
+}
+
+# ---- 解释器：优先探测结果，其次 PATH ----
+_python() {
+  if [ -n "${WAF_PYTHON:-}" ] && [ -x "${WAF_PYTHON}" ]; then
+    printf '%s\n' "$WAF_PYTHON"
+  elif command -v python >/dev/null 2>&1; then
+    printf 'python\n'
+  elif command -v python3 >/dev/null 2>&1; then
+    printf 'python3\n'
+  else
+    printf 'python\n'
+  fi
+}
+
+if _waf_active; then
+  exec "$(_python)" "$WAF_ROOT/waf/curlshim.py" "$@"
+fi
+
+# WAF 未开启：直接透传，不付出任何额外代价
+REAL_CURL=$(_find_real_curl) || {
+  echo "[agent-waf] 找不到真实 curl" >&2
+  exit 127
+}
+exec "$REAL_CURL" "$@"

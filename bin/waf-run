@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# HuntGuard: run any command with the guard active (Git Bash / WSL / macOS / Linux).
+#
+# Usage:
+#   waf-run python exp.py              # inject guard into child Python
+#   waf-run --no-shim python exp.py    # guard only, do not touch PATH
+#   waf-run --shell "curl http://x/?delete=1"
+#
+# Self-locating: works no matter where the folder is or what it is named.
+
+# 本脚本位于 <root>/bin/ 下，所以安装根目录是它的上一级。
+_waf_bin="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_waf_root="$(cd "$_waf_bin/.." && pwd)"
+
+_py="${WAF_PYTHON:-python}"
+command -v "$_py" >/dev/null 2>&1 || _py=python3
+exec "$_py" "$_waf_root/waf/runner.py" "$@"

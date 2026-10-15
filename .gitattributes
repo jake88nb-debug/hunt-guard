@@ -1,0 +1,60 @@
+# ---------------------------------------------------------------
+# 换行符规则 —— 这个文件很重要
+# ---------------------------------------------------------------
+# Git 在 Windows 上默认可能把文本文件写成 CRLF。对 bash 脚本来说
+# 这是致命的：CRLF 会让 shebang 行变成 "#!/usr/bin/env bash\r"，
+# 别人在 Linux/macOS/Git Bash 上一执行就报
+#   /usr/bin/env: 'bash\r': No such file or directory
+# 而且报错信息完全看不出是换行符问题，极难排查。
+#
+# 所以这里显式声明：
+#   * shell 脚本（含无扩展名的 bin/curl、wafctl）→ 强制 LF
+#   * Windows 批处理 → 强制 CRLF（cmd.exe 对 LF 兼容性不稳）
+#   * 其余文本 → 交给 Git 自动判断
+# ---------------------------------------------------------------
+
+# 默认：自动检测文本，仓库内统一存 LF
+* text=auto eol=lf
+
+# ---------------------------------------------------------------
+# Shell 脚本：必须 LF
+# ---------------------------------------------------------------
+*.sh        text eol=lf
+bin/curl    text eol=lf
+wafctl      text eol=lf
+
+# ---------------------------------------------------------------
+# Windows 批处理：必须 CRLF
+# ---------------------------------------------------------------
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+*.ps1       text eol=crlf
+
+# ---------------------------------------------------------------
+# 二进制：不要碰
+# ---------------------------------------------------------------
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.zip       binary
+*.gz        binary
+*.7z        binary
+*.exe       binary
+*.dll       binary
+*.pdf       binary
+*.db        binary
+*.sqlite    binary
+*.keystore  binary
+
+# 证书与私钥：永不转换
+*.crt       binary
+*.pem       binary
+*.key       binary
+
+# ---------------------------------------------------------------
+# 语言标记（GitHub 统计用）
+# ---------------------------------------------------------------
+*.py        linguist-language=Python
+*.html      linguist-language=HTML

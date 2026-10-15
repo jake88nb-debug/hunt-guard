@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# HuntGuard 命令行入口（Git Bash / WSL）
+WAF_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PY="${WAF_PYTHON:-python}"
+command -v "$PY" >/dev/null 2>&1 || PY=python3
+exec "$PY" "$WAF_ROOT/waf/cli.py" "$@"

@@ -1,0 +1,115 @@
+name: tests
+
+# 实测发现：仓库没有 CI，测试在开发机上就不绿，
+# 而且有"只在我这台机器上成立"的假设（ls -la 在 Windows 必失败、
+# 转发测试写死退出码、8 个测试硬依赖 bash）。
+# 这个 workflow 把测试放到三个平台上跑，把那些假设暴露出来。
+#
+# 覆盖矩阵的取舍：
+#   * windows-latest —— 主要目标平台，必须有
+#   * ubuntu-latest  —— 验证"非 Windows 也能跑"，含 shell 脚本语法
+#   * macos-latest   —— 验证 BSD 工具链（stat -c 不支持那种坑）
+# 三个都跑同一个测试套件；缺 bash 的测试会自动 skip。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        python: ["3.8", "3.12"]
+        exclude:
+          # 3.8 只在 Windows 上验证（本工具主力平台的最低版本），
+          # 其余平台用较新的解释器省 runner 时间
+          - os: ubuntu-latest
+            python: "3.8"
+          - os: macos-latest
+            python: "3.8"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: 显示环境（排查用）
+        run: |
+          python --version
+          python -c "import sys; print(sys.platform, sys.version_info)"
+
+      - name: 跑测试套件
+        # 不装任何第三方依赖 —— 这正是"零依赖"承诺的验证。
+        # cryptography / requests 缺失时相关测试会 skip，不该失败。
+        run: python waf/cli.py test
+
+      - name: 语法检查 + 警告当作错误
+        shell: bash
+        # ast.parse 抓不到 SyntaxWarning（比如 docstring 里写了无效转义
+        # \d —— Python 3.12 起这类会升级成 SyntaxError）。
+        # 必须用 compileall + -W error::SyntaxWarning 才管得住。
+        run: |
+          python -W error::SyntaxWarning -m compileall -q waf hooks tests
+          echo "语法 OK，且无 SyntaxWarning"
+          python - <<'PY'
+          import ast, os, sys
+          bad = []
+          for folder, dirs, files in os.walk("."):
+              dirs[:] = [d for d in dirs
+                         if d not in ("__pycache__", ".git", "dist")]
+              for name in files:
+                  if not name.endswith(".py"):
+                      continue
+                  path = os.path.join(folder, name)
+                  try:
+                      ast.parse(open(path, encoding="utf-8").read())
+                  except SyntaxError as exc:
+                      bad.append("%s: %s" % (path, exc))
+          if bad:
+              print("\n".join(bad))
+              sys.exit(1)
+          print("全部 Python 文件语法 OK")
+          PY
+
+      - name: shell 脚本语法
+        shell: bash
+        run: |
+          for f in bin/curl bin/waf-run bin/waf-bash-env.sh \
+                   scripts/install_shim.sh scripts/make-release.sh wafctl; do
+            [ -f "$f" ] || continue
+            bash -n "$f" && echo "OK  $f"
+          done
+
+      - name: ASCII-only 检查（批处理必须纯 ASCII）
+        shell: bash
+        run: |
+          # cmd.exe 按系统代码页读 .bat/.cmd；非 ASCII 字节会破坏解析。
+          # 这是踩过的坑（中文导致 start.bat 闪退），必须有 CI 盯着。
+          python - <<'PY'
+          import os, sys
+          bad = []
+          for folder, dirs, files in os.walk("."):
+              dirs[:] = [d for d in dirs
+                         if d not in ("__pycache__", ".git", "dist")]
+              for name in files:
+                  if not name.endswith((".bat", ".cmd", ".ps1")):
+                      continue
+                  path = os.path.join(folder, name)
+                  try:
+                      open(path, "rb").read().decode("ascii")
+                  except UnicodeDecodeError as exc:
+                      bad.append("%s (offset %d)" % (path, exc.start))
+          if bad:
+              print("非 ASCII 的批处理文件：")
+              print("\n".join(bad))
+              sys.exit(1)
+          print("批处理文件全部纯 ASCII OK")
+          PY
