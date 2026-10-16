@@ -621,10 +621,51 @@ wafctl events clear --keep-days 7      # 只留最近 7 天
 # 接入管理
 wafctl install-path                    # 安装 curl 接入
 wafctl install-path --machine          # 机器级（需管理员，全局生效）
-wafctl uninstall-path                  # 移除接入
+wafctl uninstall-path                  # 卸载：移除接入 + 复核最终状态
+wafctl uninstall-path --purge-data     # 顺带删 data（记录/规则/证书，不可逆）
 
-wafctl test                            # 跑自测（279 项）
+wafctl test                            # 跑自测（279+ 项）
 ```
+
+---
+
+## 卸载（一键恢复原状）
+
+不想用了，双击 **`uninstall.bat`**（或管理员 cmd 里跑
+`wafctl uninstall-path`）。它做的事：
+
+1. 停掉控制台（如果正开着）
+2. 撤掉安装时写进系统的**全部**接入：
+   cmd AutoRun / PowerShell profile 指针 / BASH_ENV / PYTHONPATH /
+   `HUNTGUARD_HOME` 与 `AGENTWAF_HOME` / 指向本目录的 PATH 条目
+3. **复核**：重新查一遍这些位置，把"实际还剩什么"打出来
+   （不是"我执行了什么" —— 权限不足时那两项会明确报告为残留，
+   并提示用管理员重跑）
+4. 问你要不要连 `data\`（拦截记录、规则、证书）和这个文件夹一起删 —
+   **默认都不删**
+
+删不掉的东西只有两类，都写在输出里：机器级 PATH 需要管理员权限，
+以及"当前窗口"里的旧环境变量要新开终端才消失。
+
+无人值守（自动化 / AI 调用，不需要键盘）：
+
+```bat
+set WAF_UNINSTALL=yes     && uninstall.bat   :: 只撤接入
+set WAF_UNINSTALL=purge   && uninstall.bat   :: 撤接入 + 删 data
+set WAF_UNINSTALL=all     && uninstall.bat   :: 全删（含这个文件夹）
+```
+
+为什么是这个变量而不是 `echo Y | uninstall.bat`：cmd 的 `set /p`
+第一次调用会把整个重定向缓冲当成一个值吃掉，多提问的批处理没法用
+管道驱动 —— 所以提供环境变量入口。
+
+**删这个文件夹前它自己会验身**：必须同时存在 `waf\cli.py`、`README.md`、
+`uninstall.bat`，且不是盘根（`D:\` 这种）才允许自删；否则只提示
+"请手动删除"。一个错误的 `rd /s /q` 正是这个工具存在的意义之一，
+自己不能犯。
+
+卸完之后 `curl` / PowerShell / Python 全部回到原生行为，
+本目录变成一堆无害的文件，删掉即可 —— **没有任何东西留在外面**。
 
 ## 规则升级
 
@@ -879,5 +920,5 @@ python3 waf/cli.py stop
 
 ## 更新记录
 
-见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **1.1.7**
+见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **1.1.8**
 （拦截面与安全修复较多，建议升级后跑一次 `wafctl install-path --force`）。

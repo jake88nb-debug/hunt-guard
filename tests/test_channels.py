@@ -578,7 +578,7 @@ class TestLaunchersExist(unittest.TestCase):
         root = os.path.dirname(HERE)
         expected = [
             "wafctl", "wafctl.cmd",             # 命令行入口
-            "start.bat", "stop.bat", "install.bat",
+            "start.bat", "stop.bat", "install.bat", "uninstall.bat",
             "start-proxy.bat",
             "bin/curl", "bin/curl.cmd",         # curl 拦截器
             "bin/waf-run", "bin/waf-run.cmd",   # 带护栏跑任意命令

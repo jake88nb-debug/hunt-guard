@@ -5,6 +5,59 @@
 
 ---
 
+## 1.1.8 — 2026-10-16
+
+### 一键卸载（双击 `uninstall.bat`）
+
+别人不想用了，得能干干净净地走。新增 `uninstall.bat`：双击 → 回答
+两个问题 → 恢复原状。做三件事：
+
+1. 停掉控制台（如果正开着）
+2. 撤掉安装时写进系统的全部接入（cmd AutoRun / PowerShell profile 指针 /
+   BASH_ENV / PYTHONPATH / `HUNTGUARD_HOME` + `AGENTWAF_HOME` / PATH 条目）
+3. **复核**：重新查一遍这些位置，报告"实际还剩什么"
+
+第 3 步是特意加的：`uninstall()` 的返回值说的是"我执行了什么" ——
+权限不足、注册表不可用、本来就没装过，三种都是"跳过"，在用户眼里
+和"失败"没区别。所以 `wafctl uninstall-path` 现在跑完会调用新的
+`install_path.verify_clean()` 逐项复查，有残留就非零退出码。
+
+配套：
+
+* `wafctl uninstall-path --purge-data` —— 顺带删 `data/`
+  （拦截记录 / 规则 / CA 证书）。默认不删。
+* 无人值守入口（自动化 / AI 用）：`WAF_UNINSTALL=yes|purge|all`。
+  为什么不靠 `echo Y | uninstall.bat`：cmd 的 `set /p` 第一次调用会把
+  整个重定向缓冲当成一个值吃掉（实测 `_ANS` 变成三行连在一起，
+  后面的 `if` 直接语法错），多提问的批处理没法用管道驱动。
+* 自删这个文件夹前会**验身**：`waf\cli.py` + `README.md` +
+  `uninstall.bat` 三者齐全、且不是盘根才允许；否则提示手动删。
+* `data/` 清理有硬闸：盘根一律拒绝，且默认只肯删安装目录内的路径
+  （`purge_data_dir` 的 `require_inside_root`）。
+
+### 过程中修掉的两个批处理坑（都是真跑出来的，不是读代码看出来的）
+
+* **块内未转义的括号**：`echo ... (keeping data)...` 写在
+  `if ... ( ... ) else ( ... )` 里，cmd 会在第一个未转义的 `)` 处
+  提前结束块，后面整行变成 "此时不应有 ..."。选"保留 data"的用户
+  一按回车就崩。已改为 `^(` `^)`。
+* **提问必须在 `call` 之前**：批处理里 `call` 另一个批处理会吃掉继承
+  的 stdin，导致其后的 `set /p` 读不到东西（自动化场景尤其明显）。
+  现在所有提问都排在定位 Python 之前 —— 顺带好处是：用户答完 Y 才
+  发现没装 Python 时，什么都还没改。
+
+### 自测
+
+新增 `tests/test_uninstall.py`（16 项）：假注册表 + 临时 profile/bashrc/
+site-packages 上跑完整的**装 → 卸 → 复核干净**，并断言用户自己的
+PATH 条目、profile 内容、PYTHONPATH 一个都没被吃掉；
+另含 `data/` 清理的防呆（拒绝盘根、拒绝安装目录外）与
+`uninstall.bat` 的静态检查。批处理本身另在沙箱副本里跑过三种无人值守
+模式与交互流程（`cli.py` 换桩，不碰本机）。
+
+自测 279 → **295** 项。
+---
+
 ## 1.1.7 — 2026-10-16
 
 ### 文档重构（无代码改动）

@@ -818,12 +818,49 @@ def cmd_install_path(args):
 
 
 def cmd_uninstall_path(args):
+    """卸载：清掉所有指向本工具的接入，然后**复核最终状态**。
+
+    复核这一步不能省（实测踩过）：``uninstall()`` 的返回值说的是
+    "清理动作执行得怎么样"，权限不足 / 注册表不可用 / 本来就没装过
+    都可能是失败或跳过 —— 用户真正要看的是"这些钩子还在不在"。
+    所以把结果和状态分开报，卸不干净时退出码非 0（脚本里能判）。
+    """
     from waf import install_path
+
+    purge = bool(getattr(args, "purge_data", False))
+
+    # 删 data/ 之前先停控制台：事件库和心跳文件被占用时删不干净
+    if purge:
+        try:
+            cmd_stop(SimpleNamespace())
+        except Exception as exc:                      # noqa: BLE001
+            out("  （停止控制台时出错，继续：%s）" % exc)
+
     results = install_path.uninstall()
     for name, (ok, msg) in results.items():
         out("%s %s：%s" % ("[OK]  " if ok else "[!!]  ", name, msg))
+
+    if purge:
+        ok, msg, _removed = install_path.purge_data_dir()
+        out("%s 清理 data：%s" % ("[OK]  " if ok else "[!!]  ", msg))
+
     out("")
-    out("  已恢复原生 curl 行为。重新安装：wafctl install-path")
+    out("  复核（卸载后的实际状态，不是上面那些动作的结果）：")
+    dirty = []
+    for name, clean, detail in install_path.verify_clean():
+        out("    %s %-18s %s" % ("[ok]  " if clean else "[残留]", name, detail))
+        if not clean:
+            dirty.append(name)
+
+    out("")
+    if dirty:
+        out("  仍有残留：%s" % "、".join(dirty))
+        out("  机器级 PATH 只能管理员改：用管理员身份重跑一次本命令。")
+        return 1
+    out("  已恢复原生行为：重开一个终端后，curl / PowerShell / Python 都不再经过拦截器。")
+    if not purge:
+        out("  data 目录（拦截记录 / 规则 / 证书）保留着；要一起删："
+            "wafctl uninstall-path --purge-data")
     return 0
 
 
@@ -1230,7 +1267,10 @@ def build_parser():
     p.add_argument("--force", action="store_true", help="即使已生效也重新安装")
     p.set_defaults(func=cmd_install_path)
 
-    p = sub.add_parser("uninstall-path", help="移除 PATH 接入")
+    p = sub.add_parser("uninstall-path",
+                       help="卸载：移除全部接入（AutoRun/BASH_ENV/profile/PYTHONPATH/环境变量）")
+    p.add_argument("--purge-data", dest="purge_data", action="store_true",
+                   help="连 data 目录一起删（拦截记录/规则/证书，不可逆）")
     p.set_defaults(func=cmd_uninstall_path)
 
     p = sub.add_parser("check", help="单次检测（URL / curl 命令 / 文本）")

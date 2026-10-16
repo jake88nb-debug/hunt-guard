@@ -84,6 +84,18 @@ cd hunt-guard
 
 **关掉**：双击 `stop.bat`，或 `wafctl off` —— 之后一切回到原样。
 
+**不想用了 / 想彻底恢复原状**：双击 **`uninstall.bat`** —— 它会把安装时
+写进系统的接入全部撤掉（cmd AutoRun、PowerShell profile、BASH_ENV、
+PYTHONPATH、HUNTGUARD_HOME 等环境变量、PATH 条目），撤完**再复核一遍**
+并把结果打出来；要不要连 `data\`（拦截记录 / 规则 / 证书）和这个文件夹
+一起删，它都会先问你，默认不删。无人值守时用环境变量：
+
+```bat
+set WAF_UNINSTALL=yes     && uninstall.bat   :: 只撤接入，保留数据和目录
+set WAF_UNINSTALL=purge   && uninstall.bat   :: 撤接入 + 删 data
+set WAF_UNINSTALL=all     && uninstall.bat   :: 全删（含这个文件夹）
+```
+
 **要用删除类请求测漏洞时**：`wafctl unlock --minutes 10 --reason "..."`
 临时放行，到点自动恢复。
 

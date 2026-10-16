@@ -1312,6 +1312,129 @@ def uninstall():
     return results
 
 
+CLEAN_CHECK_NAMES = (
+    "cmd_autorun", "powershell_profile", "bash_env", "python_hook",
+    "home_env", "user_path", "machine_path",
+)
+
+
+def verify_clean():
+    """卸载之后复核：机器上还有没有指向本工具的接入。
+
+    为什么不能只看 ``uninstall()`` 的返回值（实测踩过）：
+    那些返回值说的是"我这次清理动作的结果"——失败原因可能是
+    权限不足、注册表不可用、根本没装过（"跳过"），三种情况在
+    用户眼里都是"没看到 OK"。而用户真正要知道的是**最终状态**：
+    这些东西还在不在。所以卸载完必须重新查一遍。
+
+    返回 ``[(名称, 是否干净, 说明)]``，名称见 CLEAN_CHECK_NAMES。
+    """
+    checks = []
+
+    def add(name, dirty, detail=""):
+        checks.append((name, not dirty,
+                       detail or ("仍有残留" if dirty else "无残留")))
+
+    def guard(name, func, dirty_when):
+        try:
+            add(name, dirty_when(func()))
+        except Exception as exc:                      # noqa: BLE001
+            add(name, True, "无法判定：%s" % exc)
+
+    guard("cmd_autorun", has_cmd_autorun, bool)
+    guard("powershell_profile", has_powershell_profile, bool)
+    guard("bash_env", has_bash_env, bool)
+    guard("python_hook", has_python_hook, bool)
+    guard("home_env", has_home_env, bool)
+
+    # 用户级 / 机器级 PATH 里是否还留着指向本工具 bin 的条目。
+    # 只读检查，不写注册表 —— 非管理员也能跑（机器级只能看不能改）。
+    target = _normalize(bin_dir())
+    for scope, name in (("User", "user_path"), ("Machine", "machine_path")):
+        if not is_windows():
+            add(name, False, "非 Windows，不适用")
+            continue
+        try:
+            entries = path_entries(read_registry_path(scope))
+        except Exception as exc:                      # noqa: BLE001
+            add(name, True, "无法读取 %s PATH：%s" % (scope, exc))
+            continue
+        residue = []
+        for part in entries:
+            try:
+                if _normalize(part) == target:
+                    residue.append(part)
+            except OSError:
+                continue
+        add(name, bool(residue),
+            ("仍有条目：%s" % residue[0]) if residue else "无残留")
+    return checks
+
+
+def purge_data_dir(path=None, require_inside_root=True):
+    """删掉 data/ 里的运行数据（拦截记录、规则、证书、设置）。
+
+    **不可逆**：events.db 里是完整拦截记录，certs/ 下有 CA 私钥，
+    rules.json 可能是用户自己改过的规则。所以：
+      * 只在用户明确要求时调用（`wafctl uninstall-path --purge-data`，
+        或双击 uninstall.bat 时回答 y）
+      * 默认要求目标在**安装目录内**（防呆：别让一个被改过的配置
+        或手滑的参数把别处的目录删了）
+      * 删完把 data/ 本身也一并移除；下次启动会自动重建默认规则
+
+    返回 ``(ok, msg, 删除文件数)``。
+    """
+    data_dir = os.path.abspath(path or config.DATA_DIR)
+
+    # 盘根/文件系统根一律拒绝 —— 这一条与 require_inside_root **无关**，
+    # 必须是最后一道闸：一个手滑的参数（--purge-data 指到 D:\）就会
+    # 把整个盘删了，而"删除"正是这个工具存在的意义，自己不能犯这种错。
+    drive, tail = os.path.splitdrive(data_dir)
+    if tail in ("", os.sep, "/"):
+        return False, "拒绝删除：%s 是盘根/文件系统根" % data_dir, 0
+
+    root = os.path.abspath(config.ROOT)
+    if require_inside_root:
+        try:
+            inside = os.path.commonpath([data_dir, root]) == root
+        except ValueError:                            # 不同盘符
+            inside = False
+        if not inside or data_dir == root:
+            return False, ("拒绝删除：%s 不在安装目录内（%s）"
+                           % (data_dir, root)), 0
+
+    if not os.path.isdir(data_dir):
+        return True, "data 目录不存在，无需清理", 0
+
+    removed = 0
+    errors = []
+    for folder, dirs, files in os.walk(data_dir):
+        for name in files:
+            full = os.path.join(folder, name)
+            try:
+                os.remove(full)
+                removed += 1
+            except OSError as exc:
+                errors.append("%s（%s）" % (full, exc))
+    for folder, dirs, files in os.walk(data_dir, topdown=False):
+        for name in dirs:
+            full = os.path.join(folder, name)
+            try:
+                os.rmdir(full)
+            except OSError as exc:
+                errors.append("%s（%s）" % (full, exc))
+    try:
+        os.rmdir(data_dir)
+    except OSError as exc:
+        errors.append("%s（%s）" % (data_dir, exc))
+
+    if errors:
+        return False, ("删了 %d 个文件，但有 %d 项失败（多半是控制台还开着、"
+                       "文件被占用）：%s"
+                       % (removed, len(errors), "；".join(errors[:3]))), removed
+    return True, "已删除 data 目录（%d 个文件）" % removed, removed
+
+
 def status(path_probe=False):
     """诊断报告：告诉用户 curl 到底会解析到哪个文件。
 
