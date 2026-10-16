@@ -300,7 +300,7 @@ details summary:hover{color:var(--fg)}
 <header>
   <div class="logo">
     <span class="dot" id="dot"></span>
-    HuntGuard <small id="ver">v1.1.6</small>
+    HuntGuard <small id="ver">v1.1.7</small>
     <span class="by">by <b>Jake</b></span>
   </div>
   <div class="themer" id="themer">
@@ -696,7 +696,7 @@ const SOURCES = ["url", "path", "query", "body", "headers", "method", "host", "r
 async function api(path, opts) {
   // 带上 auth_token（如果服务端配置了）。token 由服务端注入页面
   // （见 api.py 的 _inject_token）—— 早先 UI 完全不发这个头，
-  // 于是"按 README 开启 auth_token"会让整个控制台报废且无法从界面改回。
+  // 于是"按文档开启 auth_token"会让整个控制台报废且无法从界面改回。
   const headers = { "Content-Type": "application/json" };
   if (window.__WAF_TOKEN) headers["X-Auth-Token"] = window.__WAF_TOKEN;
   const res = await fetch(path, Object.assign({ headers: headers }, opts || {}));

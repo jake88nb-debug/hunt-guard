@@ -71,7 +71,7 @@ def _guess_root():
     顺序：
       1. WAF_ROOT —— 显式指定（waf-run 会设）
       2. HUNTGUARD_HOME / AGENTWAF_HOME —— 安装时写进用户环境变量的
-         **主指针**，README 里说明的定位方式
+         **主指针**，USAGE.md 里说明的定位方式
       3. sys.path 里找带 waf/guard.py 的目录
 
     为什么必须加第 2 条（曾经整条 Python 通道因此失效）：

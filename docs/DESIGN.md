@@ -183,7 +183,7 @@ PowerShell 逻辑进用户 profile。问题是删掉项目目录后系统里留�
 * 一个注册表值：`HKCU\...\Command Processor\AutoRun`
 * PowerShell profile 里的**一行**：`. "$env:HUNTGUARD_HOME\bin\waf.ps1"`
 * `~/.bashrc` 里的**一行**：指向 `bin/waf-bash-env.sh`
-* （MCP 集成已移除：它是把护栏钥匙交给 AI，见 README 对应章节）
+* （MCP 集成已移除：它是把护栏钥匙交给 AI，见 USAGE.md 对应章节）
 
 `wafctl audit` 把全部足迹列出来，`wafctl uninstall-path` 一键清干净。
 
