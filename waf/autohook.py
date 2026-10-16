@@ -172,7 +172,22 @@ def _read_setting_enabled(root):
 
 
 def _requests_ready():
-    """requests 是否已经被真正打过补丁。"""
+    """requests 是否已经被真正打过补丁。
+
+    必须看**真的被包过的那个函数**（实测踩过，后果严重）：
+    早先这里看 ``requests.Session.request``，而 guard 包的是
+    ``Session.send`` —— ``Session.request`` 永远是原版，本函数永远
+    返回 False，``_state["patched"]`` 也就永远置不上：
+      * import 钩子摘不掉，之后每次 import requests/httpx/urllib3/aiohttp
+        都会再触发一次 _install
+      * _install 从第二次起带 force=True → 所有补丁被反复包层
+      * 实测后果：一次 ``requests.get`` 被扫 36 次，事件库里同一条请求
+        重复出现（层数随 import 次数一路增长）
+
+    现在看 guard 打在包装函数上的 _waf_wrapped 标记 —— 与实际补丁点
+    一一对应；guard 侧也做了幂等（见 guard._patch_requests），
+    两边都不可能再叠层。
+    """
     try:
         import requests
     except ImportError:
@@ -180,10 +195,10 @@ def _requests_ready():
     except Exception:
         return False
     try:
-        marker = getattr(requests.Session.request, "_agentwaf_patched", False)
-        if marker:
+        send = requests.Session.send
+        if getattr(send, "_waf_wrapped", False):
             return True
-        return requests.Session.request.__name__ == "guarded_request"
+        return getattr(send, "__name__", "") == "guarded_send"
     except Exception:
         return False
 

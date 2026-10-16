@@ -45,7 +45,7 @@ PROXY_HOST = "127.0.0.1"
 # 拦截时的退出码（126 = 命令找到但不可执行，符合 POSIX 语义）
 BLOCK_EXIT_CODE = 126
 
-VERSION = "1.1.5"
+VERSION = "1.1.6"
 
 DEFAULT_CONFIG = {
     "api_host": API_HOST,

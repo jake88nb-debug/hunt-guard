@@ -270,7 +270,13 @@ wafctl uninstall-path   # 一键清掉全部指针
 | **Git Bash（非交互）** | ZCode、Claude Code、Codex 执行 shell 命令 | `BASH_ENV` | ✅ 拦截 |
 | **Python 进程** | AI 写的 `exp.py`、requests 脚本 | `PYTHONPATH` + `hooks/sitecustomize.py` | ✅ 拦截 |
 | **cmd** | AI 调 `cmd /c`、部分工具 | `HKCU AutoRun` | ✅ 拦截 |
-| **PowerShell** | 部分工具、你手敲 | profile（删 curl 别名 + 前置 PATH） | ✅ 拦截 |
+| **PowerShell** | 部分工具、你手敲 | profile（删 curl 别名 + 前置 PATH + 包装 `Invoke-*`） | ✅ 拦截 |
+
+**PowerShell 那条不只是 `curl`**：`Invoke-WebRequest` / `Invoke-RestMethod`
+既不经过 curl、也不经过 PATH，所以 profile 会把这两个 cmdlet 包一层
+（用 PowerShell 自己的 `ProxyCommand` 从已安装的 cmdlet 生成，参数表
+跟着你的 PS 版本走），发出去之前先问一次 `waf/pshook.py`。
+`irm -Method Delete -Uri ...` 同样会被拦下。
 
 关键点：**AI 工具的 shell 是"非交互式"的**，它不读 `~/.bashrc`。
 所以必须用 `BASH_ENV`（非交互 bash 启动时必读的文件）—— 这是本次
@@ -335,12 +341,19 @@ icacls "D:\agent-waf\data" /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"
 
 | 场景 | 说明 |
 |---|---|
-| AI 用工具**内置的 HTTP 客户端**（不走 shell、不走 Python 库） | 需机器级 PATH + 该工具自己支持代理；这是工具内部实现，外部拦不住 |
+| AI 用工具**内置的 HTTP 客户端**（不走 shell、不走 Python 库、不走 PowerShell） | 需机器级 PATH + 该工具自己支持代理；这是工具内部实现，外部拦不住 |
 | 直接调 `curl.exe` 全路径 | PATH 拦截不到明确路径，需机器级 PATH |
 | `powershell -NoProfile` | 跳过 profile，需机器级 PATH |
 | 管理员权限运行的进程 | 需机器级 PATH |
+| **裸 socket 手写报文把 body 拆成两次 `sendall`** | 见下（只影响手写报文，库请求不受影响） |
 | **超过 256KB 的请求体尾部** | 见下 |
 | **代理模式下的 HTTPS 内容** | 见下 |
+
+**裸 socket 的边界（1.1.6 新增说明）**：传输层只看得到"第一行就是
+HTTP 请求行"的字节块。手写报文正常写法是一次 `sendall` 发完（请求行 +
+头 + body 在一起，全都扫）；如果你刻意拆成两次发（先头后 body），
+第二段没有请求行特征，看不到。库发的请求不受影响 ——
+`http.client` 自己会分层发，但那条路径由 `http.client` 补丁覆盖。
 
 **大请求体的边界**：单个字段只扫前 **256KB**（`settings.max_scan_bytes`）。
 超出的部分**不检查** —— 把敏感词放在 256KB 之后就能过去。
@@ -474,7 +487,14 @@ waf-run python exp.py
 
 `waf-run` 做两件事：给子 Python 进程注入 `sitecustomize.py`（启动即装护栏），
 并把 `bin\` 放到子进程 PATH 最前（子进程调 curl 也走 WAF）。
-护栏覆盖 `requests` / `urllib` / `httpx` / `aiohttp` / `subprocess` / `os.system`。
+
+护栏覆盖：`requests` / `urllib` / `httpx` / `aiohttp` / `urllib3` /
+`http.client` / 裸 `socket` / `subprocess` / `os.system`。
+
+后两项（`http.client` 与裸 socket）是 1.1.6 补的**传输层兜底**：
+按库挂钩总有漏网的（`HTTPConnection(...).request("DELETE", ...)`、
+`sendall(b"DELETE /api/x HTTP/1.1...")` 原先一个字都不用混淆就能过），
+所以直接挂到标准库最底层。同一请求穿过多层时只扫一次、只记一条事件。
 
 `waf-run` 属于**显式调用** —— 你主动用它，就等于表态"我要护栏"，所以
 不受控制台开关限制。想让护栏跟随控制台开关：
@@ -616,7 +636,7 @@ wafctl install-path                    # 安装 curl 接入
 wafctl install-path --machine          # 机器级（需管理员，全局生效）
 wafctl uninstall-path                  # 移除接入
 
-wafctl test                            # 跑自测（230 项）
+wafctl test                            # 跑自测（279 项）
 ```
 
 ## 规则升级
@@ -669,7 +689,7 @@ hunt-guard\                ← 你解压/克隆出来的目录，名字随意
 ├── docs\DESIGN.md         框架设计说明
 ├── CHANGELOG.md           更新记录
 ├── .github\workflows\     CI（三平台 × 两 Python 版本）
-└── tests\                 自测（230 项）
+└── tests\                 自测（279 项）
 ```
 
 ---
@@ -681,11 +701,12 @@ hunt-guard\                ← 你解压/克隆出来的目录，名字随意
 | ID | 名称 | 动作 |
 |---|---|---|
 | R-101 | 删除/销毁类（delete、remove、destroy、unlink、purge、rm -rf、shred…） | **拦截** |
-| R-102 | 数据库破坏（drop table、truncate、delete from、shutdown） | **拦截** |
+| R-102 | 数据库破坏（drop table、truncate table/**truncate users**、delete from、**flushdb**、**dropDatabase/drop_collection**、shutdown） | **拦截** |
 | R-103 | 磁盘破坏（mkfs、dd of=/dev/sda、fork 炸弹） | **拦截** |
 | R-104 | 账户删除（userdel、groupdel、net user /delete） | **拦截** |
 | R-105 | **短删除指令 del / rm**（词边界精确匹配） | **拦截** |
 | R-106 | **删除命令的 Windows/SCM/脚本写法**（rd /s、Remove-Item、os.remove、rimraf、rmtree…） | **拦截** |
+| R-107 | **权限变更 / 表结构破坏**（GRANT…TO、REVOKE…FROM、ALTER TABLE…DROP、ALTER USER…PASSWORD） | **拦截** |
 | R-203 | 反弹 Shell（/dev/tcp、nc -e、mkfifo 管道） | **拦截** |
 
 ### 扩展：与删除同级的高危操作（拦截）
@@ -709,7 +730,7 @@ hunt-guard\                ← 你解压/克隆出来的目录，名字随意
 
 | ID | 名称 | 覆盖内容 |
 |---|---|---|
-| R-201 | 危险写操作 | update、insert、chmod、reboot |
+| R-201 | 危险写操作 | update、insert、chmod、reboot（grant/revoke 已移到 R-107 按拦截处理） |
 | R-202 | 漏洞利用痕迹 | /etc/passwd、union select、xp_cmdshell |
 | R-309 | **凭证转储** | mimikatz、lsass、ntds.dit、dcsync（测生产域建议改 block） |
 | R-311 | **扫描器 / 爆破工具** | nmap、sqlmap、hydra、ffuf、gobuster |
@@ -871,5 +892,5 @@ python3 waf/cli.py stop
 
 ## 更新记录
 
-见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **1.1.5**
+见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **1.1.6**
 （拦截面与安全修复较多，建议升级后跑一次 `wafctl install-path --force`）。

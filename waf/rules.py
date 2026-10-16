@@ -24,7 +24,7 @@ MARKER = "AGENT_WAF_HOME"      # 保留：供 install_path 复用
 # 注意：**改了任何内置规则的内容都必须 +1**，否则磁盘上的 rules.json
 # 不会更新（迁移靠 rev 比较触发）。实测踩过：改完正则忘了提版本，
 # 测试跑出来的还是旧规则的行为。
-DEFAULTS_REV = 15
+DEFAULTS_REV = 16
 
 # rev < 此值的规则视为"早期内置规则"，允许升级时刷新内容。
 # 仅用于兼容没有 _builtin_hash 标记的历史文件；rev 达到此值后，
@@ -349,6 +349,36 @@ DEFAULT_RULES = [
         "regex": [
             r"\bdrop\s+(table|database|schema|index|view)\b",
             r"\btruncate\s+table\b",
+            # TRUNCATE 后面**直接跟标识符**（MySQL/PG 的合法写法：
+            # TRUNCATE users;）—— 实测只查 "truncate table" 时
+            # `TRUNCATE users` 直接过。
+            #
+            # 误伤控制靠一张"自然语言停用词"表：TRUNCATE 后面跟
+            # the/file/string/data 这类词的，是在说"截断字符串/文件"，
+            # 不是 SQL。判据只排除**紧跟其后**的那个词，所以
+            # `truncate the users table` 也不拦（那本来就不是 SQL）。
+            # 注意复数形式要逐个列出：lookahead 里的 \b 不会让
+            # "file" 命中 "files"。
+            r"\btruncate\s+(?:table\s+)?(?:if\s+exists\s+)?[\`\"\[]?"
+            r"(?!(?:the|this|that|these|those|a|an|all|any|its|it|my|our|"
+            r"your|their|to|and|or|for|with|from)\b)"
+            r"(?!(?:string|strings|text|line|lines|file|files|log|logs|"
+            r"data|value|values|name|names|column|columns|field|fields|"
+            r"input|output|length|size|count|message|messages|path|url|"
+            r"content|result|results|buffer|array|arraylist|list|number|"
+            r"numbers|time|date|table|tables|row|rows|space|whitespace)\b)"
+            r"[a-z_][a-z0-9_$]*[\`\"\]]?",
+            # Redis 清库。FLUSHALL 在 R-101 关键词里，FLUSHDB 实测
+            # 两条规则都拦不到（用户报告的绕过之一）。
+            r"\bflushdb\b",
+            r"\bflushall\b",
+            # Mongo / ORM 的**驼峰与下划线写法**：db.dropDatabase()、
+            # drop_collection、deleteCollection、removeDB……
+            # `drop\s+database` 那种写法一个都匹配不到。
+            r"\b(?:drop|delete|remove)[\s_\-]?(?:database|db|collection|"
+            r"collections)s?\b",
+            # pymongo / mongosh：collection.drop()
+            r"\.drop\s*\(\s*\)",
             r"\bdelete\s+from\b",
             r"\bupdate\s+\w+\s+set\b.*\bwhere\s+1\s*=\s*1",
             r"\bshutdown\b",
@@ -392,6 +422,45 @@ DEFAULT_RULES = [
         "note": "删除账户 / 组成员",
     },
     {
+        "id": "R-107",
+        "name": "权限变更 / 表结构破坏",
+        "enabled": True,
+        "severity": "high",
+        "action": "block",
+        # grant / revoke 用 word 模式而不是 substring：
+        # OAuth 的 grant_type 是**最高频的正常参数之一**，
+        # substring 会把它一起拦下（实测 "grant " 这个带空格的写法
+        # 恰好躲过了 grant_type，但 body 里的 "grant": 形态躲不过）。
+        # word 模式的边界是 [a-z0-9_]：grant_type / granted / revokeAll
+        # 全都不命中，GRANT ALL ON *.* TO ... 照拦。
+        "match_mode": "regex",
+        "keywords": [],
+        "regex": [
+            # GRANT/REVOKE 的**语句形态**，而不是把 "grant" 当裸词拦。
+            #
+            # 为什么不能用裸词（实测）：OAuth 的 grant_type 是最高频的
+            # 正常参数之一，而 IAM 类接口里 "grant" 本身就是一个权限
+            # 动作名（{"permission":"grant"}、scope 串里的 grant:write）。
+            # 裸词（哪怕带词边界）会把这些正常请求一起拦下。
+            # 这里要求 grant/revoke 后面**跟一个真实的权限词**，
+            # 或者构成 "GRANT <角色> TO <主体>" 的完整句式。
+            r"\b(?:grant|revoke)\s+(?:all|select|insert|update|delete|"
+            r"drop|alter|create|execute|usage|references|truncate|super|"
+            r"connect|temporary|replication|privileges|role)\b",
+            r"\bgrant\s+\w{1,40}\s+to\s+\w",
+            r"\brevoke\s+\w{1,40}\s+from\s+\w",
+            # 表结构破坏
+            r"\balter\s+table\b[^;]{0,240}?\bdrop\b",
+            r"\bdrop\s+(?:column|constraint|partition|trigger)\b",
+            # 账户提权（不改密码不算，改了就是接管）
+            r"\balter\s+(?:user|role)\b[^;]{0,200}?\b(?:identified|password|"
+            r"superuser|createdb|createrole)\b",
+        ],
+        "exclude": [],
+        "note": "GRANT/REVOKE 提权与 ALTER TABLE ... DROP 结构破坏；"
+                "原先只记在 R-201（monitor），按实测建议提到 block",
+    },
+    {
         "id": "R-201",
         "name": "危险写操作（需人工确认）",
         "enabled": True,
@@ -399,7 +468,11 @@ DEFAULT_RULES = [
         "action": "monitor",
         "match_mode": "substring",
         "keywords": [
-            "update ", "insert into", "alter table", "grant ", "revoke ",
+            # grant / revoke 已提到 R-107 按 block 处理，这里不再重复
+            # 记录（同一个词命中两条规则只会在事件里多一条噪声）。
+            # alter table 保留：非破坏性的 ALTER 仍值得留痕，
+            # 破坏性的 ALTER TABLE ... DROP 由 R-107 拦下。
+            "update ", "insert into", "alter table",
             "chmod ", "chown ", "overwrite", "> /etc/", "shutdown -h",
             "reboot", "halt",
         ],

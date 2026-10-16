@@ -246,6 +246,22 @@ def _run_probe(patterns, timeout, budget):
 
     结果列表按输入顺序给出 {safe, worst, err}；整体超时返回 (None, True)。
     """
+    def _internal_spawn():
+        """父进程侧声明"这是内部探测"，别让护栏来查这一跳。
+
+        延迟 import：guard 依赖 engine，engine 依赖本模块 —— 模块级
+        互相 import 会成环。
+
+        拿不到 guard（例如单独跑 regexguard 的场景）就退化成空上下文，
+        行为与以前一致。
+        """
+        try:
+            from . import guard
+            return guard.internal_call()
+        except Exception:
+            import contextlib
+            return contextlib.nullcontext()
+
     cmd = [sys.executable, "-c", _PROBE_SRC,
            json.dumps(list(patterns)), json.dumps(list(_SAMPLES)),
            json.dumps(budget)]
@@ -260,13 +276,18 @@ def _run_probe(patterns, timeout, budget):
     # 无限递归（冷缓存时 stderr 刷满 engine_error，已实测复现）。
     env = dict(os.environ)
     env["WAF_INTERNAL_PROC"] = "1"
-    try:
-        proc = subprocess.run(cmd, capture_output=True, timeout=timeout,
-                              creationflags=creationflags, env=env)
-    except subprocess.TimeoutExpired:
-        return None, True
-    except (OSError, subprocess.SubprocessError):
-        return None, False            # 探测不可用 → 调用方保守放行
+    # 父进程侧同样要声明一次（WAF_INTERNAL_PROC 只管子进程内部）：
+    # 否则这次 Popen 会走 guard.guarded_popen → _check_cmd →
+    # _console_gate() → get_engine() → 而引擎此刻**正在加载中**
+    # （单例还没赋值）→ 又起一次探测 → 栈溢出崩溃。实测复现过。
+    with _internal_spawn():
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=timeout,
+                                  creationflags=creationflags, env=env)
+        except subprocess.TimeoutExpired:
+            return None, True
+        except (OSError, subprocess.SubprocessError):
+            return None, False            # 探测不可用 → 调用方保守放行
 
     results = {}
     out = (proc.stdout or b"").decode("utf-8", "replace")

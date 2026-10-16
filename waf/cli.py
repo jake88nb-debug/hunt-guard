@@ -1100,18 +1100,64 @@ def cmd_ca(args):
 
 
 def cmd_test(args):
-    """运行内置自测。"""
-    import unittest
-    sys.path.insert(0, os.path.join(ROOT, "tests"))
-    loader = unittest.TestLoader()
-    try:
-        suite = loader.discover(os.path.join(ROOT, "tests"), pattern="test_*.py")
-    except Exception as exc:
-        out("无法加载测试：%s" % exc)
+    """运行内置自测（在子进程里跑，见下面的"为什么"）。
+
+    为什么必须隔离子进程 + HUNTGUARD_NO_HOOK=1（实测踩过）：
+    自测套件里有**故意发破坏性请求**的用例（验证各层到底拦不拦），
+    而本进程很可能已经装了运行时护栏 —— 只要控制台在跑，PYTHONPATH
+    上的 sitecustomize 就会在本进程装一遍补丁，而 socket / http.client /
+    subprocess 这些钩子是**进程级**的。于是：
+
+      * 用例自己发的包被护栏先拦掉，用例拿到 WafBlocked 报错
+      * 更隐蔽的是"跑一半才中招"：套件里的控制台用例会写出心跳文件，
+        后半段的用例才开始被拦 —— 测试结果变成"取决于用户此刻开没开
+        控制台"。实测：开着控制台跑 110 项里报 10 项 WafBlocked。
+
+    所以自测在**没有环境护栏**的干净子进程里跑；要验证护栏本身的用例
+    自己显式 install_guard（它们本来就是这么写的，并带 tearDown 还原）。
+    """
+    tests_dir = os.path.join(ROOT, "tests")
+    env = dict(os.environ)
+    env["HUNTGUARD_NO_HOOK"] = "1"
+    env["AGENTWAF_NO_HOOK"] = "1"
+
+    # 用例文件被安全软件"吃掉"时给一句人话（实测遇到过）。
+    #
+    # 现象：某些杀软/EDR 会在 python.exe 打开**含大量破坏性字符串的
+    # .py 文件**时判为可疑并隔离 —— 实测 test/test_waf.py 被读取的
+    # 瞬间变成 Bad file descriptor 并被删除（同样的内容存成 .txt
+    # 或拆小就没事，说明是"体积+内容"的启发式，不是简单特征串）。
+    # 不提示的话，用户看到的只是 unittest 的一行 ImportError。
+    if not os.path.isdir(tests_dir):
+        out("找不到测试目录：%s" % tests_dir)
         return 1
-    runner = unittest.TextTestRunner(verbosity=2)
-    result = runner.run(suite)
-    return 0 if result.wasSuccessful() else 1
+    missing = [name for name in ("test_waf.py", "test_channels.py",
+                                 "test_transport.py")
+               if not os.path.isfile(os.path.join(tests_dir, name))]
+    if missing:
+        out("提醒：测试文件不在了 —— %s" % "、".join(missing))
+        out("如果之前能跑，多半是本机杀软把用例当可疑脚本隔离了"
+            "（用例里本来就全是破坏性载荷）。")
+        out("处理：把 %s 加入杀软白名单，或 git checkout -- tests/ 恢复。"
+            % ROOT)
+
+    cmd = [sys.executable, "-m", "unittest", "discover",
+           "-s", tests_dir, "-p", "test_*.py", "-v"]
+
+    # 本进程自己的护栏也不该来查这一跳（它是我自己的测试运行器）。
+    try:
+        from waf import guard
+        marker = guard.internal_call()
+    except Exception:
+        marker = None
+    try:
+        if marker is not None:
+            with marker:
+                return subprocess.call(cmd, env=env, cwd=ROOT)
+        return subprocess.call(cmd, env=env, cwd=ROOT)
+    except OSError as exc:
+        out("无法启动测试进程：%s" % exc)
+        return 1
 
 
 # ---------------------------------------------------------------- 入口

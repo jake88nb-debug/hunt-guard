@@ -15,6 +15,7 @@
 被拦截时抛出 waf.models.WafBlocked。
 """
 
+import contextvars
 import os
 import sys
 import threading
@@ -31,7 +32,8 @@ from waf.models import ScanTarget, WafBlocked         # noqa: E402
 _installed = False
 _lock = threading.RLock()
 _follow_console = False
-_stats = {"checked": 0, "blocked": 0, "skipped": 0}
+_stats = {"checked": 0, "blocked": 0, "skipped": 0, "deduped": 0,
+          "errors": 0}
 
 # 重入闸。
 #
@@ -119,6 +121,127 @@ def _print_block(verdict):
                                      include_meta=os.environ.get("WAF_VERBOSE") == "1") + "\n")
 
 
+# "工具自己在干活"的投递闸。
+#
+# 为什么需要（实测踩过，后果是 Python 栈溢出崩溃）：
+#   _check_cmd → _console_gate() → get_engine() → 引擎首次加载
+#   → regexguard 起 ReDoS 探测子进程 → subprocess.Popen（我们包的）
+#   → _check_cmd → _console_gate() → get_engine()（单例还没赋值，
+#     引擎仍然是冷的）→ 再起探测 → …… 每一层都认为自己该查，
+#   直接 RecursionError / 栈溢出把进程打死。
+#
+# 触发条件是"引擎冷 + 探测缓存冷"（改规则会换缓存指纹，第一次必中；
+# 全新安装同理）。所以两道闸都要有：
+#   1. _check_cmd 的重入闸提到最前面（结构调整上不可能无限递归）
+#   2. 内部子进程由调用方**显式声明**（regexguard 探测用 internal_call），
+#      连扫描门槛都不用走
+_internal = threading.local()
+
+
+class internal_call(object):
+    """上下文管理器：块内发起的子进程属于工具自身，不做检查。
+
+    用法（见 waf/regexguard.py 的探测）：
+
+        with guard.internal_call():
+            subprocess.run(...)
+    """
+
+    def __enter__(self):
+        _internal.depth = getattr(_internal, "depth", 0) + 1
+        return self
+
+    def __exit__(self, *exc):
+        _internal.depth = max(0, getattr(_internal, "depth", 1) - 1)
+        return False
+
+
+def is_internal_call():
+    """当前线程是否正在执行工具自身的内部动作（探测子进程等）。"""
+    return getattr(_internal, "depth", 0) > 0
+
+
+# ---------------------------------------------------------- 同一请求只扫一次
+#
+# 传输层挂钩（http.client / socket）装上之后，同一个请求会**穿过多层**：
+#
+#     requests.post(...)
+#       → urllib3.urlopen                 ← 第 2 层
+#         → http.client._send_request     ← 第 3 层
+#           → socket.sendall              ← 第 4 层
+#
+# 每层都扫、每层都记一条事件的话，一次请求就是四条一模一样的记录。
+# 这个坑在自己身上踩过两次：早先 requests 的 request/send 双挂钩、
+# 以及 urllib3 与 requests 同时挂上时，表现都是事件列表里同一条请求
+# 重复出现、拦截统计翻倍，失去参考价值。
+#
+# 判据：**同一条委托链上 + 同 (method, path+query)** = 同一个请求。
+# 最外层挂钩登记，内层看到"已在飞行中"就直接跳过。
+#
+# 两个关键实现细节，都是实测踩出来的：
+#
+#   1. 登记必须**跨越委托调用**，不能只包住自己那一次 check。
+#      早先是"扫完就注销"，于是外层注销后才轮到内层挂钩，
+#      内层看到的永远是空栈 —— 实测一次 requests.get 被扫 36 次
+#      （叠了 9 层包装 × 4 级库）。现在用 with 把 check 和
+#      original(...) 一起圈住，见 _enter_delegation。
+#   2. 状态必须存在 **contextvars** 而不是 threading.local：
+#      aiohttp 的 await 会让同一个线程上交错执行不同任务的请求，
+#      用线程本地会把"另一个任务发往同一路径的请求"误判成重复。
+#      contextvars 天然按线程/任务隔离（每个 asyncio 任务一份上下文），
+#      正好是我们要的语义。
+#
+# 跳过为什么安全：外层拿到的信息严格更多（完整 URL + 库序列化好的
+# body）。内层唯一可能多出来的东西是"没有任何挂钩覆盖的库自己拼的
+# 报文" —— 那种情况下外层根本没挂钩、也就没人登记，内层自然成为
+# 第一层，照扫不误。
+#
+# 为什么不怕漏：判据要求**路径也相同**，所以委托链中间顺手发起的
+# 其它请求（OAuth 换 token、回调等，路径不同）照样会被检查；
+# 循环里的连续请求不在委托链上，一条都不会被跳过。
+_tasks = contextvars.ContextVar("huntguard_inflight", default=())
+_INFLIGHT_MAX = 16
+
+
+def _inflight_key(method, url):
+    """(method, path+query) 指纹 —— 各层挂钩对同一个请求的唯一共识。"""
+    from urllib.parse import urlsplit
+    try:
+        parts = urlsplit(url or "")
+        path = parts.path or ""
+        query = parts.query or ""
+    except Exception:
+        path, query = str(url or ""), ""
+    if not path and not query:
+        path = str(url or "")
+    return "%s %s?%s" % ((method or "").upper(), path.lower(), query.lower())
+
+
+def _enter_delegation(method, url):
+    """进入一层挂钩的委托；返回 None 表示外层已在处理同一个请求。
+
+    调用方必须把 check_request(...) 与 original(...) **都**放进
+    try/finally 里，并在 finally 中调 _exit_delegation(token)。
+    """
+    key = _inflight_key(method, url)
+    stack = _tasks.get() or ()
+    if key in stack:
+        return None
+    if len(stack) >= _INFLIGHT_MAX:
+        # 正常委托链只有 4 层，到不了这里；上限只为异常路径兜底。
+        stack = stack[-4:]
+    _tasks.set(stack + (key,))
+    return key
+
+
+def _exit_delegation(token):
+    if not token:
+        return
+    stack = _tasks.get() or ()
+    if token in stack:
+        _tasks.set(tuple(k for k in stack if k != token))
+
+
 def check_request(method="GET", url="", headers=None, body="", params=None,
                   tool="python", log=True):
     """检查一个出站请求；命中则抛 WafBlocked，否则返回 Verdict。"""
@@ -141,6 +264,11 @@ def check_request(method="GET", url="", headers=None, body="", params=None,
             url = url + ("&" if "?" in url else "?") + joined
         except Exception:
             pass
+    return _check_request_inner(method, url, headers, body, tool, log)
+
+
+def _check_request_inner(method, url, headers, body, tool, log):
+    from urllib.parse import urlsplit
 
     host = path = query = ""
     try:
@@ -206,14 +334,33 @@ def _patch_requests():
 
     original_send = requests.Session.send
 
-    def guarded_send(self, request, **kwargs):
-        body = request.body
-        check_request(method=request.method, url=request.url,
-                      headers=dict(request.headers or {}),
-                      body=_safe_body(body) if body else "",
-                      tool="requests")
-        return original_send(self, request, **kwargs)
+    # 幂等：install_guard(force=True) 会被反复调用（autohook 在宿主
+    # 每次 import HTTP 库时都可能重装），必须保证同一条链路只包一层。
+    #
+    # 为什么这是硬要求（实测）：包了两层 = 一个请求扫两次、事件列表
+    # 两条；包了九层就是九条。曾经因为 autohook 的 _requests_ready()
+    # 判断错了被包过的函数（看 Session.request，而我们包的是
+    # Session.send），force 重装被触发 8 次，实测一次 requests.get
+    # 被扫了 36 次。
+    if getattr(original_send, "_waf_wrapped", False):
+        return True
 
+    def guarded_send(self, request, **kwargs):
+        token = _enter_delegation(request.method, request.url)
+        if token is None:
+            _stats["deduped"] += 1
+            return original_send(self, request, **kwargs)
+        try:
+            body = request.body
+            check_request(method=request.method, url=request.url,
+                          headers=dict(request.headers or {}),
+                          body=_safe_body(body) if body else "",
+                          tool="requests")
+            return original_send(self, request, **kwargs)
+        finally:
+            _exit_delegation(token)
+
+    guarded_send._waf_wrapped = True
     requests.Session.send = guarded_send
 
     def _api_call(method, url, **kw):
@@ -243,24 +390,66 @@ def _patch_urllib():
     original_open = urlreq.OpenerDirector.open
     original_urlopen = urlreq.urlopen
 
+    if (getattr(original_open, "_waf_wrapped", False)
+            and getattr(original_urlopen, "_waf_wrapped", False)):
+        return True                            # 幂等，见 _patch_requests
+
     def guarded_open(self, fullurl, data=None, timeout=None):
+        # body 可能在**两个地方**，必须都看（实测漏过：AI 用
+        # urllib 发 DELETE 带 body 时「方法查得到、body 查不到」）。
+        #
+        #   urlopen("http://x/y", data=b"...")      → data 参数
+        #   urlopen(Request("http://x/y", data=b"...")) → Request 对象上
+        #
+        # 第二种是更常见的写法（要自定义 method/headers 就得自己造
+        # Request），此时 data 参数恒为 None，早先只看参数就等于
+        # body 完全没有检查 —— 一个字都不用混淆就能绕过。
         if hasattr(fullurl, "full_url"):
             url = fullurl.full_url
             method = getattr(fullurl, "get_method", lambda: "GET")() or "GET"
             headers = dict(getattr(fullurl, "headers", {}) or {})
+            if data is None:
+                data = getattr(fullurl, "data", None)
         else:
             url = str(fullurl)
             method = "GET"
             headers = {}
-        check_request(method=method, url=url, headers=headers,
-                      body=_safe_body(data) if data else "", tool="urllib")
-        return original_open(self, fullurl, data, timeout)
+        token = _enter_delegation(method, url)
+        if token is None:
+            _stats["deduped"] += 1
+            return original_open(self, fullurl, data, timeout)
+        try:
+            check_request(method=method, url=url, headers=headers,
+                          body=_safe_body(data) if data else "", tool="urllib")
+            return original_open(self, fullurl, data, timeout)
+        finally:
+            _exit_delegation(token)
 
     def guarded_urlopen(url, data=None, timeout=None, **kwargs):
-        check_request(method="POST" if data else "GET", url=str(url),
-                      body=_safe_body(data) if data else "", tool="urllib")
-        return original_urlopen(url, data=data, timeout=timeout, **kwargs)
+        if hasattr(url, "full_url"):
+            # Request 对象：method 与 body 都以对象上的为准
+            method = getattr(url, "get_method", lambda: "GET")() or "GET"
+            headers = dict(getattr(url, "headers", {}) or {})
+            full = url.full_url
+            if data is None:
+                data = getattr(url, "data", None)
+        else:
+            method = "POST" if data else "GET"
+            headers = {}
+            full = str(url)
+        token = _enter_delegation(method, full)
+        if token is None:
+            _stats["deduped"] += 1
+            return original_urlopen(url, data=data, timeout=timeout, **kwargs)
+        try:
+            check_request(method=method, url=full, headers=headers,
+                          body=_safe_body(data) if data else "", tool="urllib")
+            return original_urlopen(url, data=data, timeout=timeout, **kwargs)
+        finally:
+            _exit_delegation(token)
 
+    guarded_open._waf_wrapped = True
+    guarded_urlopen._waf_wrapped = True
     urlreq.OpenerDirector.open = guarded_open
     urlreq.urlopen = guarded_urlopen
     # install_opener 之后仍走 OpenerDirector.open，因此已覆盖
@@ -282,22 +471,31 @@ def _patch_httpx():
 
     def _make_guard(original):
         def guarded(self, method, url, **kwargs):
-            data = kwargs.get("data")
-            if data is None:
-                data = kwargs.get("json")
-            check_request(method=method, url=str(url),
-                          headers=kwargs.get("headers") or {},
-                          body=_safe_body(data) if data is not None else "",
-                          tool="httpx")
-            return original(self, method, url, **kwargs)
+            token = _enter_delegation(method, str(url))
+            if token is None:
+                _stats["deduped"] += 1
+                return original(self, method, url, **kwargs)
+            try:
+                data = kwargs.get("data")
+                if data is None:
+                    data = kwargs.get("json")
+                check_request(method=method, url=str(url),
+                              headers=kwargs.get("headers") or {},
+                              body=_safe_body(data) if data is not None else "",
+                              tool="httpx")
+                return original(self, method, url, **kwargs)
+            finally:
+                _exit_delegation(token)
+        guarded._waf_wrapped = True
         return guarded
 
-    if hasattr(httpx, "Client") and hasattr(httpx.Client, "request"):
-        httpx.Client.request = _make_guard(httpx.Client.request)
-    # AsyncClient 是协程方法，同样签名的 wrapper 直接可用
-    # （我们只做同步检查，然后返回原始协程）
-    if hasattr(httpx, "AsyncClient") and hasattr(httpx.AsyncClient, "request"):
-        httpx.AsyncClient.request = _make_guard(httpx.AsyncClient.request)
+    for owner in (getattr(httpx, "Client", None),
+                  getattr(httpx, "AsyncClient", None)):
+        if owner is None or not hasattr(owner, "request"):
+            continue
+        if getattr(owner.request, "_waf_wrapped", False):
+            continue                            # 幂等，见 _patch_requests
+        owner.request = _make_guard(owner.request)
     return True
 
 
@@ -324,6 +522,8 @@ def _patch_urllib3():
         return False
 
     original = _cp.HTTPConnectionPool.urlopen
+    if getattr(original, "_waf_wrapped", False):
+        return True                                # 幂等，见 _patch_requests
 
     def guarded_urlopen(self, method, url, body=None, headers=None, **kwargs):
         try:
@@ -335,13 +535,23 @@ def _patch_urllib3():
                                       ":%s" % port if port else "", url)
         except Exception:
             full = str(url)
-        check_request(method=method, url=full,
-                      headers=dict(headers or {}),
-                      body=_safe_body(body) if body else "",
-                      tool="urllib3")
-        return original(self, method, url, body=body, headers=headers, **kwargs)
+        token = _enter_delegation(method, full)
+        if token is None:
+            _stats["deduped"] += 1
+            return original(self, method, url, body=body, headers=headers,
+                            **kwargs)
+        try:
+            check_request(method=method, url=full,
+                          headers=dict(headers or {}),
+                          body=_safe_body(body) if body else "",
+                          tool="urllib3")
+            return original(self, method, url, body=body, headers=headers,
+                            **kwargs)
+        finally:
+            _exit_delegation(token)
 
     _cp.HTTPConnectionPool.urlopen = guarded_urlopen
+    guarded_urlopen._waf_wrapped = True
     return True
 
 
@@ -352,18 +562,351 @@ def _patch_aiohttp():
         return False
 
     original_request = aiohttp.ClientSession._request
+    if getattr(original_request, "_waf_wrapped", False):
+        return True                                # 幂等，见 _patch_requests
 
-    def guarded_request(self, method, str_or_url, **kwargs):
-        data = kwargs.get("data")
-        if data is None:
-            data = kwargs.get("json")
-        check_request(method=method, url=str(str_or_url),
-                      headers=kwargs.get("headers") or {},
-                      body=_safe_body(data) if data is not None else "",
-                      tool="aiohttp")
-        return original_request(self, method, str_or_url, **kwargs)
+    # 必须是 async def：委托范围要**跨过 await** 才管用。
+    # aiohttp 底层走 asyncio 的 sock_sendall（即 socket.send），
+    # 如果这里是普通函数，with 块在协程被 await 之前就退出了，
+    # 底层那一跳会再扫一次（实测重复）。
+    # 跨 await 的隔离靠 contextvars：每个任务一份上下文，
+    # 线程本地在这里会串任务（见 _tasks 的说明）。
+    async def guarded_request(self, method, str_or_url, **kwargs):
+        token = _enter_delegation(method, str(str_or_url))
+        if token is None:
+            _stats["deduped"] += 1
+            return await original_request(self, method, str_or_url, **kwargs)
+        try:
+            data = kwargs.get("data")
+            if data is None:
+                data = kwargs.get("json")
+            check_request(method=method, url=str(str_or_url),
+                          headers=kwargs.get("headers") or {},
+                          body=_safe_body(data) if data is not None else "",
+                          tool="aiohttp")
+            return await original_request(self, method, str_or_url, **kwargs)
+        finally:
+            _exit_delegation(token)
 
     aiohttp.ClientSession._request = guarded_request
+    guarded_request._waf_wrapped = True
+    return True
+
+
+# ------------------------------------------------- 传输层兜底（http.client / socket）
+#
+# 为什么要有这一层（实测绕过，不是理论缺口）：
+#
+#   HTTPConnection(host, port).request("DELETE", "/api/users/1")
+#
+# http.client 不属于任何"按库挂钩"的目标，一个字都不用混淆就能过。
+# 裸 socket 手写报文同理。更根本的问题是：按库挂钩**永远滞后** ——
+# 以后冒出来的新 HTTP 客户端只要自己拼报文，就自动是个缺口。
+#
+# 分工（两层互补，缺一不可）：
+#   * 库级挂钩（requests/urllib/httpx/urllib3/aiohttp）
+#     看得到 **HTTPS 的明文**（加密前），这是传输层做不到的
+#   * 传输层（http.client/socket）
+#     看得到**明文 HTTP 的真实字节**，不依赖任何库的实现细节
+#
+# HTTPS 在 socket 层是密文，看不懂也不用看懂 —— 那是库级挂钩的活。
+# 反过来明文 HTTP 走任何库/裸 socket 都会被这两层兜住。
+#
+# 同一请求穿多层的问题由 check_request 里的飞行指纹解决（见那里）。
+
+# 只认这些方法名，避免把二进制协议里恰好长得像请求行的数据当成 HTTP。
+_HTTP_METHODS = frozenset([
+    "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "TRACE",
+    "CONNECT", "PROPFIND", "PROPPATCH", "MKCOL", "COPY", "MOVE", "LOCK",
+    "UNLOCK", "SEARCH", "REPORT", "MERGE", "PURGE", "DEBUG", "ACL",
+    "BIND", "REBIND", "UNBIND", "LINK", "UNLINK", "CHECKOUT", "CHECKIN",
+    "VERSION-CONTROL", "BASELINE-CONTROL", "MKCALENDAR", "NOTIFY",
+    "SUBSCRIBE", "UNSUBSCRIBE", "SOURCE", "LABEL", "ORDERPATCH", "UPDATE",
+])
+_HTTP_REQ_LINE = None
+_HTTP_HEADER_SEP = None
+_HTTP_MAX_SCAN = 262144          # 与 engine 的 max_scan_bytes 保持一致
+
+
+def _http_req_line_re():
+    """编译请求行正则（惰性 —— 没装护栏的进程一点开销都不付）。"""
+    global _HTTP_REQ_LINE, _HTTP_HEADER_SEP
+    if _HTTP_REQ_LINE is None:
+        import re as _re
+        # METHOD SP target SP HTTP/x.y CRLF —— 三段缺一不可。
+        #
+        # 只要求"前三个 token 对"，不解析 URI 语法：target 可以是
+        # origin-form（/x?y=1）、absolute-form（http://h/x，代理风格）、
+        # authority-form（CONNECT h:443）—— 全都原样交给引擎，
+        # 由 urlsplit 自己拆。
+        _HTTP_REQ_LINE = _re.compile(
+            rb"^([A-Za-z][A-Za-z\-]{2,20})[ \t]+(\S{1,4096})[ \t]+"
+            rb"HTTP/(\d\.\d)[ \t]*\r?\n")
+        _HTTP_HEADER_SEP = _re.compile(rb"\r?\n\r?\n")
+    return _HTTP_REQ_LINE
+
+
+def parse_raw_http_request(data):
+    """把一段以请求行开头的字节解析成 (method, target, headers, body)。
+
+    不是 HTTP 请求就返回 None —— 裸 socket 上还跑着 Redis / MySQL /
+    WebSocket 这些二进制协议，只有"请求行"这个强特征才值得扫。
+
+    为什么不看 HTTP/0.9（没有版本号的那种上古写法）：没法在不误判
+    的前提下与普通文本区分，收益也接近零。
+    """
+    if not data:
+        return None
+    chunk = data[:_HTTP_MAX_SCAN] if isinstance(data, bytes) else bytes(data)[:_HTTP_MAX_SCAN]
+    match = _http_req_line_re().match(chunk)
+    if not match:
+        return None
+    method = match.group(1).decode("latin-1").upper()
+    if method not in _HTTP_METHODS:
+        return None
+    target = match.group(2).decode("latin-1")
+
+    rest = chunk[match.end():]
+    sep = _HTTP_HEADER_SEP.search(rest)
+    if sep:
+        header_blob, body = rest[:sep.start()], rest[sep.end():]
+    else:
+        header_blob, body = rest, b""
+
+    headers = {}
+    for line in header_blob.split(b"\n")[:200]:
+        line = line.rstrip(b"\r")
+        if b":" not in line:
+            continue
+        name, value = line.split(b":", 1)
+        try:
+            headers[name.decode("latin-1").strip()] = \
+                value.decode("latin-1").strip()
+        except Exception:
+            continue
+    return method, target, headers, body
+
+
+# 已经在上层扫过的转发（比如 MITM 代理转给上游的那一跳）要能主动
+# 声明"别重复扫我"。用 socket 对象上挂属性是不行的 ——
+# socket.socket 是 C 类型，**不允许**设置自定义属性（实测：
+# 'socket' object has no attribute）。所以用线程本地的开关。
+_no_socket_scan = threading.local()
+
+
+class no_socket_scan(object):
+    """上下文管理器：块内的 socket 发送不做传输层检查。
+
+    给"内容已经由别处检查过、只是原样转发"的场景用 —— 目前只有
+    MITM 代理转上游的那一跳（它自己已经用引擎扫过整份请求了，
+    再被 socket 层扫一次只会多记一条重复事件）。
+
+    用法::
+
+        with waf.guard.no_socket_scan():
+            upstream_socket.sendall(raw_request)
+    """
+
+    def __enter__(self):
+        _no_socket_scan.off = getattr(_no_socket_scan, "off", 0) + 1
+        return self
+
+    def __exit__(self, *exc):
+        _no_socket_scan.off = max(0, getattr(_no_socket_scan, "off", 1) - 1)
+        return False
+
+
+def _patch_httpclient():
+    """http.client 补丁 —— 标准库最底层的 HTTP 客户端。
+
+    它还是 urllib / urllib3（因而 requests 明文 HTTP 也走它）的公共
+    底座：挂在这里，等于给所有"上层没覆盖到"的库兜底。
+
+    三个入口，保证**一个请求只扫一次**：
+      * ``_send_request`` —— ``request()`` 的唯一落点，信息最全
+        （method / path / headers / body 都是对象上的现成值）。
+        扫完后在连接对象上打标记。
+      * ``putrequest`` —— 手写低级流程（putrequest → putheader →
+        endheaders）。这里**只记录不扫**：此刻 body 还没出现，
+        扫了必然在 endheaders 处再扫一次 = 同一个请求两条事件。
+      * ``endheaders`` —— 低级流程的收口。来自 _send_request 的调用
+        看到标记就跳过；手写流程在这里拿到完整请求。
+    """
+    try:
+        import http.client as httpclient
+    except ImportError:
+        return False
+
+    original_send_request = httpclient.HTTPConnection._send_request
+    original_putrequest = httpclient.HTTPConnection.putrequest
+    original_endheaders = httpclient.HTTPConnection.endheaders
+
+    if getattr(original_send_request, "_waf_wrapped", False):
+        return True                                # 幂等，见 _patch_requests
+
+    marker = "_waf_scanned_request"
+    pending = "_waf_pending_request"
+
+    def _compose(conn, path):
+        """把 path 补成全 URL —— 白名单/自身接口判定都按主机来。"""
+        try:
+            host = getattr(conn, "host", "") or ""
+            port = getattr(conn, "port", None)
+            secure = isinstance(conn, getattr(httpclient, "HTTPSConnection", ()))
+            scheme = "https" if secure else "http"
+            default = 443 if secure else 80
+            netloc = host
+            if port and int(port) != default:
+                netloc = "%s:%s" % (host, port)
+            if not netloc:
+                netloc = "unknown"
+            return "%s://%s%s" % (scheme, netloc, path or "/")
+        except Exception:
+            return path or "/"
+
+    def guarded_send_request(self, method, url, body, headers, *rest, **kw):
+        if getattr(_scannable, "depth", 0) > 0:
+            # 扫描自身触发的网络流量不检查（见 _scannable 的说明）。
+            return original_send_request(self, method, url, body, headers,
+                                         *rest, **kw)
+        full = _compose(self, str(url))
+        # 标记置上就代表"这个请求已经过检查"（无论这里是真扫了还是
+        # 因为外层已扫而跳过）—— 内部的 endheaders 看到就不再扫。
+        setattr(self, marker, True)
+        token = _enter_delegation(method, full)
+        if token is None:
+            _stats["deduped"] += 1
+            return original_send_request(self, method, url, body, headers,
+                                         *rest, **kw)
+        try:
+            check_request(method=method, url=full,
+                          headers=dict(headers or {}),
+                          body=_safe_body(body) if body is not None else "",
+                          tool="http.client")
+            return original_send_request(self, method, url, body, headers,
+                                         *rest, **kw)
+        finally:
+            _exit_delegation(token)
+
+    def guarded_putrequest(self, method, url, *rest, **kw):
+        if getattr(_scannable, "depth", 0) == 0:
+            setattr(self, pending, (str(method), str(url)))
+        return original_putrequest(self, method, url, *rest, **kw)
+
+    def guarded_endheaders(self, message_body=None, *rest, **kw):
+        if getattr(self, marker, False):
+            # 来自 _send_request：整个请求（含 body）已经扫过或已由
+            # 外层挂钩扫过
+            setattr(self, marker, False)
+        else:
+            info = getattr(self, pending, None)
+            if info and getattr(_scannable, "depth", 0) == 0:
+                full = _compose(self, info[1])
+                token = _enter_delegation(info[0], full)
+                if token is None:
+                    _stats["deduped"] += 1
+                else:
+                    try:
+                        check_request(
+                            method=info[0], url=full,
+                            body=_safe_body(message_body) if message_body else "",
+                            tool="http.client")
+                    finally:
+                        _exit_delegation(token)
+        return original_endheaders(self, message_body, *rest, **kw)
+
+    httpclient.HTTPConnection._send_request = guarded_send_request
+    httpclient.HTTPConnection.putrequest = guarded_putrequest
+    httpclient.HTTPConnection.endheaders = guarded_endheaders
+    guarded_send_request._waf_wrapped = True
+    guarded_putrequest._waf_wrapped = True
+    guarded_endheaders._waf_wrapped = True
+    return True
+
+
+def _patch_socket():
+    """裸 socket 兜底 —— 不依赖任何库实现细节的最后一道网。
+
+    实测能拦的写法::
+
+        s = socket.create_connection((host, port))
+        s.sendall(b"DELETE /api/users/1 HTTP/1.1\\r\\nHost: t\\r\\n\\r\\n")
+
+    只认**第一行就是 HTTP 请求行**的字节块（METHOD SP target SP
+    HTTP/x.y）。这条判据很窄，但不是问题：
+
+      * 报文一次 sendall 发完（手写报文的常见写法）→ 请求行 +
+        headers + body 全在一起，body 一起扫
+      * 库分两次发（http.client 就是 headers 一次、body 一次）→
+        那是**库的路径**，已经被 _patch_httpclient 覆盖，且本层
+        因为飞行指纹直接跳过
+      * 裸 socket 自己分两次发 body → 这一种看不到。取舍：要在
+        传输层跟踪 body 就得给每个 socket 记状态（socket 对象不让
+        挂属性，只能另建映射表并处理生命周期与线程安全），
+        换来的只是"手写报文还要故意拆两次发"这一种极端写法。
+        已知代价，写在这里，不装作不存在。
+
+    会不会误伤普通网络流量：不会。Redis 内联命令（GET key\\r\\n）、
+    FTP（USER/PASS/LIST）、SIP（OPTIONS ... SIP/2.0）都不含
+    "HTTP/x.y"，一条都匹配不上。
+    """
+    try:
+        import socket as _socket
+    except ImportError:
+        return False
+
+    original_sendall = _socket.socket.sendall
+    original_send = _socket.socket.send
+    if getattr(original_sendall, "_waf_wrapped", False):
+        return True                                # 幂等，见 _patch_requests
+
+    def _inspect(data):
+        if getattr(_no_socket_scan, "off", 0) > 0:
+            return
+        if getattr(_scannable, "depth", 0) > 0:
+            return                          # 扫描自身发的流量
+        if not isinstance(data, (bytes, bytearray, memoryview)):
+            return
+        parsed = parse_raw_http_request(data if isinstance(data, bytes)
+                                        else bytes(data))
+        if not parsed:
+            return
+        method, target, headers, body = parsed
+        token = _enter_delegation(method, target)
+        if token is None:
+            _stats["deduped"] += 1
+            return
+        try:
+            check_request(method=method, url=target, headers=headers,
+                          body=_safe_body(body) if body else "", tool="socket")
+        finally:
+            _exit_delegation(token)
+
+    def guarded_sendall(self, data, *args, **kwargs):
+        try:
+            _inspect(data)
+        except WafBlocked:
+            raise                                    # 命中：必须拦住
+        except Exception:
+            # 解析/检查自身的异常不能让正常网络瘫痪（本层装在**每个**
+            # Python 进程里，fail-open 是这里唯一可接受的方向）。
+            # 引擎级的异常另有 fail_mode=closed 兜着（见 check_request）。
+            _stats["errors"] += 1
+        return original_sendall(self, data, *args, **kwargs)
+
+    def guarded_send(self, data, *args, **kwargs):
+        try:
+            _inspect(data)
+        except WafBlocked:
+            raise
+        except Exception:
+            _stats["errors"] += 1
+        return original_send(self, data, *args, **kwargs)
+
+    _socket.socket.sendall = guarded_sendall
+    _socket.socket.send = guarded_send
+    guarded_sendall._waf_wrapped = True
+    guarded_send._waf_wrapped = True
     return True
 
 
@@ -374,16 +917,25 @@ def _patch_subprocess():
     original_popen = subprocess.Popen
     original_system = os.system
 
+    if getattr(original_popen, "_waf_wrapped", False):
+        return True                                # 幂等，见 _patch_requests
+
     def guarded_popen(args, *rest, **kwargs):
+        if is_internal_call():
+            return original_popen(args, *rest, **kwargs)
         cmd = _cmd_text(args)
         if cmd:
             _check_cmd(cmd, "subprocess")
         return original_popen(args, *rest, **kwargs)
 
     def guarded_system(command):
+        if is_internal_call():
+            return original_system(command)
         _check_cmd(str(command), "os.system")
         return original_system(command)
 
+    guarded_popen._waf_wrapped = True
+    guarded_system._waf_wrapped = True
     subprocess.Popen = guarded_popen
     os.system = guarded_system
     return True
@@ -651,11 +1203,38 @@ def _needs_cmd_scan(cmd):
 
 
 def _check_cmd(cmd, tool):
-    """命令行类：把整条命令当 raw_cmd 扫描。"""
+    """命令行类：把整条命令当 raw_cmd 扫描。
+
+    重入闸放在**最前面**（实测踩过，后果是栈溢出崩溃）：
+    ``_console_gate()`` 会调 ``get_engine()``，而引擎首次加载要起
+    ReDoS 探测子进程 —— 那个 ``subprocess.Popen`` 又走我们的
+    ``guarded_popen`` → 回到本函数 → 再次 ``get_engine()``
+    （单例此时**还没赋值**，引擎仍是冷的）→ 再起探测 → ……
+
+        _check_cmd → _console_gate → get_engine → 探测子进程
+          → guarded_popen → _check_cmd → …（每层都认为自己该查）
+
+    闸原先放在引擎调用之前、``_console_gate()`` 之后，正好被这条
+    链绕过去。触发条件是"引擎冷 + 探测缓存冷"：本轮新增正则改了
+    缓存指纹，第一次就撞上了；更早之前缓存一直是热的，所以看不出来
+    ——真实的首次安装（全新下载）同样会命中。
+    """
+    if not _enter_scan():
+        _stats["skipped"] += 1
+        return
+    try:
+        return _check_cmd_inner(cmd, tool)
+    finally:
+        _exit_scan()
+
+
+def _check_cmd_inner(cmd, tool):
     if is_disabled():
         return
     if is_internal_process():
         return                          # 我们自己的探测子进程
+    if is_internal_call():
+        return                          # 工具内部刚发起的子进程
     if _is_own_tooling(cmd):
         return                                       # 自己的工具，豁免
     active, reason = _console_gate()
@@ -664,12 +1243,6 @@ def _check_cmd(cmd, tool):
         return
     if not _needs_cmd_scan(cmd):
         return                                       # 既不联网也没破坏动作
-    # 重入闸放在最内层：上面几步都很便宜，真正贵的是下面
-    # get_engine()（首次要跑 ReDoS 探测）。扫描自身触发的扫描
-    # 在第一次就返回，不会无限套娃。
-    if not _enter_scan():
-        _stats["skipped"] += 1
-        return
     try:
         config.ensure_dirs()
         logstore.init_db()
@@ -689,8 +1262,6 @@ def _check_cmd(cmd, tool):
             mode="block",
             tool=tool,
         ))
-    finally:
-        _exit_scan()
     _stats["checked"] += 1
     if verdict.blocked:
         _stats["blocked"] += 1
@@ -723,6 +1294,12 @@ def install_guard(patch_subprocess=True, force=False, follow_console=False):
             enabled.append("urllib3")
         if _patch_aiohttp():
             enabled.append("aiohttp")
+        # 传输层兜底放最后：库级挂钩先登记飞行指纹，传输层看到就跳过，
+        # 于是明文 HTTP 只扫一次、且扫的是信息最全的那一层。
+        if _patch_httpclient():
+            enabled.append("http.client")
+        if _patch_socket():
+            enabled.append("socket")
         if patch_subprocess:
             try:
                 if _patch_subprocess():

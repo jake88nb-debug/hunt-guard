@@ -29,6 +29,7 @@ import time
 
 from . import certs, config, logstore, state
 from .engine import get_engine
+from .guard import no_socket_scan
 from .models import ScanTarget, Verdict
 
 MAX_HEADER_BYTES = 256 * 1024
@@ -622,7 +623,13 @@ class ProxyServer(object):
                 out_headers = _rebuild_headers(headers, host, port, scheme,
                                               absolute=True,
                                               body_len=len(body))
-                sock.sendall((request_line + out_headers).encode("latin-1") + b"\r\n" + body)
+                # 已扫过：这份报文在 _handle 里已经过引擎检查（见上面的
+                # engine.scan），转发这一跳不该再被 socket 层扫一遍 ——
+                # 重复扫只会多记一条重复事件，还可能因为传输层看到的
+                # 字段更少（没有完整 URL，白名单匹配不上）而与这里的
+                # 判定不一致。
+                with no_socket_scan():
+                    sock.sendall((request_line + out_headers).encode("latin-1") + b"\r\n" + body)
                 self._relay_response(sock, client, method)
                 sock.close()
                 return True
@@ -650,7 +657,8 @@ class ProxyServer(object):
             out_headers = _rebuild_headers(headers, host, port, scheme,
                                               absolute=False,
                                               body_len=len(body))
-            sock.sendall((request_line + out_headers).encode("latin-1") + b"\r\n" + body)
+            with no_socket_scan():          # 同上：已在 _handle 里扫过
+                sock.sendall((request_line + out_headers).encode("latin-1") + b"\r\n" + body)
             self._relay_response(sock, client, method)
             sock.close()
             return True
