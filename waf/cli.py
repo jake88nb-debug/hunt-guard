@@ -1117,6 +1117,7 @@ def cmd_test(args):
     自己显式 install_guard（它们本来就是这么写的，并带 tearDown 还原）。
     """
     tests_dir = os.path.join(ROOT, "tests")
+    import subprocess                     # 本文件其它子命令都是按需 import
     env = dict(os.environ)
     env["HUNTGUARD_NO_HOOK"] = "1"
     env["AGENTWAF_NO_HOOK"] = "1"
@@ -1128,18 +1129,31 @@ def cmd_test(args):
     # 瞬间变成 Bad file descriptor 并被删除（同样的内容存成 .txt
     # 或拆小就没事，说明是"体积+内容"的启发式，不是简单特征串）。
     # 不提示的话，用户看到的只是 unittest 的一行 ImportError。
+    #
+    # 关键是**跑之前和跑之后都看**：隔离通常发生在 unittest 真的去读
+    # 文件的瞬间，跑之前文件还在，提示不会触发 —— 只能在跑完后发现
+    # "刚才还在、现在没了"。
+    watched = ("test_waf.py", "test_channels.py", "test_transport.py")
+
+    def _missing():
+        return [name for name in watched
+                if not os.path.isfile(os.path.join(tests_dir, name))]
+
     if not os.path.isdir(tests_dir):
         out("找不到测试目录：%s" % tests_dir)
         return 1
-    missing = [name for name in ("test_waf.py", "test_channels.py",
-                                 "test_transport.py")
-               if not os.path.isfile(os.path.join(tests_dir, name))]
-    if missing:
-        out("提醒：测试文件不在了 —— %s" % "、".join(missing))
-        out("如果之前能跑，多半是本机杀软把用例当可疑脚本隔离了"
-            "（用例里本来就全是破坏性载荷）。")
-        out("处理：把 %s 加入杀软白名单，或 git checkout -- tests/ 恢复。"
-            % ROOT)
+
+    def _warn_missing(names, during_run=False):
+        if during_run:
+            out("提醒：测试文件在本次运行**中途消失**了 —— %s" % "、".join(names))
+        else:
+            out("提醒：测试文件不在了 —— %s" % "、".join(names))
+        out("用例里本来就全是破坏性载荷，本机杀软很容易把它们当可疑脚本隔离。")
+        out("处理：把 %s 加入杀软白名单，然后 git checkout -- tests/ 恢复。" % ROOT)
+
+    missing_before = _missing()
+    if missing_before:
+        _warn_missing(missing_before)
 
     cmd = [sys.executable, "-m", "unittest", "discover",
            "-s", tests_dir, "-p", "test_*.py", "-v"]
@@ -1153,11 +1167,19 @@ def cmd_test(args):
     try:
         if marker is not None:
             with marker:
-                return subprocess.call(cmd, env=env, cwd=ROOT)
-        return subprocess.call(cmd, env=env, cwd=ROOT)
+                code = subprocess.call(cmd, env=env, cwd=ROOT)
+        else:
+            code = subprocess.call(cmd, env=env, cwd=ROOT)
     except OSError as exc:
         out("无法启动测试进程：%s" % exc)
         return 1
+
+    # 跑完再看一次：文件是**在测试过程中**被隔离的话，只有这里能看到。
+    vanished = [name for name in watched
+                if name not in missing_before and name in _missing()]
+    if vanished:
+        _warn_missing(vanished, during_run=True)
+    return code
 
 
 # ---------------------------------------------------------------- 入口
