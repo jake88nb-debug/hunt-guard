@@ -253,6 +253,37 @@ def _apply_ops_with_map(text, ops):
     idx = list(range(len(text)))
     for op in ops:
         try:
+            # 按需执行：触发条件不存在时这个 op 必然是空操作。
+            # 实测 256KB body 单次判定约 1 秒，绝大部分花在这里
+            # （无条件跑 8 个 op，每个都 O(n) 甚至多轮）。
+            now = "".join(chars)
+            # "+" 也是触发字符：url_decode 同时把 "+" 还原成空格
+            # （实测：`q=delete+from+users` 少了它就不会被解码，
+            #  R-102 的 delete\s+from 匹配不到 → 漏拦，被既有用例抓到）。
+            if op == "url_decode" and "%" not in now and "+" not in now:
+                continue
+            if op == "html_unescape" and "&" not in now:
+                continue
+            if op == "unicode_unescape" and "\\" not in now:
+                continue
+            if op == "fold_fullwidth" and now.isascii():
+                continue
+            if op == "strip_invisible":
+                if now.isprintable() or not (
+                        INVISIBLE_RE.search(now)
+                        or any(ord(ch) < 32 and ch not in "\t\n\r"
+                               for ch in now)):
+                    continue
+            if op == "strip_sql_comment" and "/*" not in now:
+                continue
+            if op == "collapse_ws" and not (
+                    "  " in now or "\t" in now or "\n" in now
+                    or "\r" in now or "\f" in now or "\v" in now):
+                continue
+            if op == "compact" and not SEP_RE.search(now):
+                continue
+            if op == "lower" and now.lower() == now:
+                continue
             if op == "url_decode":
                 chars, idx = _repeat_transform(
                     chars, idx, url_decode_deep, _URL_CANDIDATE_RE,

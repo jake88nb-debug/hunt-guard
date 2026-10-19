@@ -448,6 +448,20 @@ class ProxyServer(object):
     _leaf_counter = [0]
 
     def _upstream_tls_context(self, host):
+        # 进程内缓存：上下文构建要读证书库/配置，实测每个请求新建一次
+        # 是明显的固定开销；校验策略只跟环境变量有关，与 host 无关。
+        cached = getattr(self, "_tls_cache", None)
+        if cached is None:
+            cached = {}
+            self._tls_cache = cached
+        key = os.environ.get("WAF_PROXY_INSECURE", "")
+        if key in cached:
+            return cached[key]
+        ctx = self._build_upstream_tls_context(host)
+        cached[key] = ctx
+        return ctx
+
+    def _build_upstream_tls_context(self, host):
         """连上游服务器时用的 TLS 上下文。
 
         默认**校验证书**（这是实测发现的问题：之前无条件
@@ -576,6 +590,30 @@ class ProxyServer(object):
         scheme, host, port, path_query = parsed
         path, _, query = path_query.partition("?")
 
+        # 压缩请求体：解开再扫；解不了（br/zstd/损坏/膨胀过大）就拒绝，
+        # 不能"假装扫过"（实测：Content-Encoding: gzip 时 action=delete
+        # 完全看不见，目标却能解压执行）。
+        from . import bodycodec
+        # 注意这里的 headers 是 (name, value) 列表（raw_pairs），不是 dict
+        encoding = ""
+        for pair in headers or []:
+            try:
+                key, value = pair
+            except (TypeError, ValueError):
+                continue
+            if str(key).lower() == "content-encoding":
+                encoding = str(value)
+                break
+        if encoding and body:
+            decoded, status = bodycodec.decode_request_body(body, encoding)
+            if bodycodec.is_unsupported(status):
+                self._send_error(
+                    client, 415, "Unsupported Body Encoding",
+                    "请求体编码 %r 无法解码检查（%s）。"
+                    "不能检查的内容不会转发。" % (encoding, status))
+                return False
+            body = decoded
+
         # 拦截器未开启（或已被暂停）→ 纯转发，不检查不记录。
         engine = get_engine()
         active, _reason = state.should_intercept(engine)
@@ -640,9 +678,16 @@ class ProxyServer(object):
                              headers, body, version)
 
     def _scan_limit(self):
-        """本次请求允许的最大 body（与引擎的 max_scan_bytes 一致）。"""
+        """本次请求允许的最大 body（与引擎的 max_scan_bytes 一致）。
+
+        解锁窗口内放宽到 MAX_BODY_BYTES：用户明确要求放行时不该因为
+        "扫不完"被拒（实测自相矛盾：提示去 unlock，unlock 后仍被拒）。
+        """
         try:
-            value = int(get_engine().settings.get("max_scan_bytes") or 0)
+            engine = get_engine()
+            value = int(engine.settings.get("max_scan_bytes") or 0)
+            if engine.unlock_remaining() > 0:
+                return MAX_BODY_BYTES
         except Exception:
             value = 0
         if value <= 0:

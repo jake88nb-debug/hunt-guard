@@ -666,6 +666,17 @@ class RuleEngine(object):
                 continue
         return False
 
+    def request_allowed(self, target):
+        """公开接口：这个请求是否命中请求级白名单（不执行扫描）。
+
+        给"扫描上限"这类**引擎之前**的判定用：白名单里的目标本来就不
+        检查，就不该因为"body 太大扫不完"被拒（实测自相矛盾）。
+        """
+        try:
+            return self._request_level_allow(target) is not None
+        except Exception:
+            return False
+
     def _request_level_allow(self, target):
         """source=url / host 的放行条目：命中则跳过检查。
 

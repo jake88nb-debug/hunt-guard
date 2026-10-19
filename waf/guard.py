@@ -270,27 +270,70 @@ def check_request(method="GET", url="", headers=None, body="", params=None,
 def _check_request_inner(method, url, headers, body, tool, log):
     from urllib.parse import urlsplit
 
+    # 压缩请求体先解开再扫（实测绕过：Content-Encoding: gzip 时
+    # 直接扫原始字节看不到 action=delete，目标却能解压执行）。
+    from waf import bodycodec
+    _encoding = ""
+    for _key, _value in (headers or {}).items():
+        if str(_key).lower() == "content-encoding":
+            _encoding = str(_value)
+            break
+    if _encoding and not isinstance(body, str):
+        _decoded, _status = bodycodec.decode_request_body(body, _encoding)
+        if bodycodec.is_unsupported(_status):
+            from waf.models import Verdict
+            verdict = Verdict(
+                blocked=True,
+                reason="请求体编码 %r 无法解码检查（%s），拒绝发送"
+                       % (_encoding, _status),
+                stage="body_encoding", hits=[], mode="block", tool=tool,
+            )
+            _stats["blocked"] += 1
+            _print_block(verdict)
+            raise WafBlocked(verdict)
+        body = _decoded
+
     # 扫描字节 = 发送字节：body 超过扫描上限时**拒绝**，而不是
     # 只扫前 max_scan_bytes 就把完整 body 发出去（实测：payload 放在
     # 上限之后即可绕过代理 / Python 客户端）。curl 通道有同一套策略
     # （见 curlshim.BodyTooLarge），这里保持一致。
+    #
+    # unlock 窗口内**不拒绝**：错误提示让用户去 unlock，unlock 了却
+    # 还被拒就自相矛盾了（实测）。此时退回"只扫前 N 字节"的旧行为。
     try:
         from waf.engine import get_engine as _get_engine
-        _limit = int(_get_engine().settings.get("max_scan_bytes") or 262144)
+        _engine = _get_engine()
+        _limit = int(_engine.settings.get("max_scan_bytes") or 262144)
+        _unlocked = _engine.unlock_remaining() > 0
     except Exception:
-        _limit = 262144
+        _limit, _unlocked = 262144, False
     body_text = body if isinstance(body, str) else _safe_body(body)
-    if len(body_text) > _limit:
-        from waf.models import Verdict
-        verdict = Verdict(
-            blocked=True,
-            reason="请求体超过扫描上限（%d > %d 字节），拒绝发送"
-                   % (len(body_text), _limit),
-            stage="oversize", hits=[], mode="block", tool=tool,
-        )
-        _stats["blocked"] += 1
-        _print_block(verdict)
-        raise WafBlocked(verdict)
+    if len(body_text) > _limit and not _unlocked:
+        # 白名单里的目标本来就不检查，不该因为"扫不完"被拒
+        # （实测：提示让用户 unlock / 加白名单，实际两者都不管用）。
+        allowed = False
+        try:
+            from urllib.parse import urlsplit as _split
+            from waf.models import ScanTarget as _ST
+            _parts = _split(url)
+            allowed = _engine.request_allowed(_ST(
+                kind="request", method=method, url=url,
+                host=_parts.netloc, path=_parts.path,
+                query=_parts.query, tool=tool))
+        except Exception:
+            allowed = False
+        if not allowed:
+            from waf.models import Verdict
+            verdict = Verdict(
+                blocked=True,
+                reason="请求体超过扫描上限（%d > %d 字节），拒绝发送；"
+                       "调大 settings.max_scan_bytes，或 wafctl unlock"
+                       % (len(body_text), _limit),
+                stage="oversize", hits=[], mode="block", tool=tool,
+            )
+            _stats["blocked"] += 1
+            _print_block(verdict)
+            raise WafBlocked(verdict)
 
     host = path = query = ""
     try:

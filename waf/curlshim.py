@@ -48,7 +48,21 @@ _VALUE_FLAGS_BODY = ("-d", "--data", "--data-raw", "--data-binary",
                      "--data-ascii", "--data-urlencode", "--json")
 _VALUE_FLAGS_FILE = ("-F", "--form", "--form-string", "-T", "--upload-file")
 _VALUE_FLAGS_UA = ("-A", "--user-agent", "-e", "--referer")
-_VALUE_FLAGS_COOKIE = ("-b", "--cookie", "-c", "--cookie-jar")
+_VALUE_FLAGS_COOKIE = ("-b", "--cookie")
+
+# 只影响**本地**的选项：值必须被消费掉（否则会漏成位置参数、被当成
+# URL 扫进扫描面 —— 实测 `curl -o delete.txt http://x/` 被误拦、
+# `-o 1.5` 还会被归一化成 http://1.5 影响白名单判定），
+# 但它们不是发往目标的内容，所以**不进**扫描面。
+_VALUE_FLAGS_LOCAL = (
+    "-o", "--output", "-D", "--dump-header", "-w", "--write-out",
+    "--output-dir", "--trace", "--trace-ascii", "--stderr", "--libcurl",
+    "--etag-save", "--etag-compare", "-c", "--cookie-jar",
+    "-m", "--max-time", "--connect-timeout", "--retry", "--retry-delay",
+    "--retry-max-time", "--limit-rate", "-y", "--speed-time",
+    "-Y", "--speed-limit", "--max-filesize", "--max-redirs",
+    "--expect100-timeout", "--keepalive-time", "--rate", "-r", "--range",
+)
 _VALUE_FLAGS_AUTH = ("-u", "--user", "--proxy-user")
 _VALUE_FLAGS_PROXY = ("-x", "--proxy")
 _VALUE_FLAGS_MISC = ("--connect-to", "--resolve", "--interface", "--cert",
@@ -60,6 +74,7 @@ _VALUE_FLAGS_MISC = ("--connect-to", "--resolve", "--interface", "--cert",
 _VALUE_FLAGS_CONFIG = ("-K", "--config")
 
 ALL_VALUE_FLAGS = (set(_VALUE_FLAGS_METHOD) | set(_VALUE_FLAGS_URL) |
+                   set(_VALUE_FLAGS_LOCAL) |
                    set(_VALUE_FLAGS_HEADER) | set(_VALUE_FLAGS_BODY) |
                    set(_VALUE_FLAGS_FILE) | set(_VALUE_FLAGS_UA) |
                    set(_VALUE_FLAGS_COOKIE) | set(_VALUE_FLAGS_AUTH) |
@@ -83,25 +98,39 @@ class BodyTooLarge(Exception):
 _BODY_LIMIT = 262144            # 与 settings.max_scan_bytes 的默认值一致
 
 
-def set_body_limit(limit):
-    """按生效中的 settings.max_scan_bytes 调整上限（由 _main_inner 调用）。"""
-    global _BODY_LIMIT
+_STRICT_LIMIT = True
+
+
+def set_body_limit(limit, strict=True):
+    """按生效中的 settings.max_scan_bytes 调整上限（由 _main_inner 调用）。
+
+    ``strict=False`` 用于 `wafctl unlock` 窗口：超限退回"只扫前 N 字节"
+    的旧行为而不是拒绝 —— 否则错误提示让用户去 unlock，unlock 了却
+    还是被拒（实测自相矛盾）。
+    """
+    global _BODY_LIMIT, _STRICT_LIMIT
     try:
         value = int(limit)
     except (TypeError, ValueError):
         return
     if value >= 4096:
         _BODY_LIMIT = value
+    _STRICT_LIMIT = bool(strict)
 
 
-def _normalize_url_token(token):
+def _normalize_url_token(token, positional=False):
     """把 curl 接受的"URL"归一化成可比较形式。
 
     curl 允许不带 scheme（``curl victim.local/delete`` 默认按 http 处理），
     早先 _is_url 只认带 scheme 的，于是
         curl http://127.0.0.1/x --next victim.local/delete
     里第二个 URL 根本不进 urls —— 白名单命中第一个后整个请求免检。
-    返回 None 表示"不像 URL"（纯选项、纯文本参数）。
+
+    ``positional=True`` 用于**位置参数**：curl 把每个位置参数都当 URL，
+    所以单标签主机（metadata / intranet 这类内网名，实测常用的
+    SSRF 目标）也必须算。选项值已经被消费掉了，不会混进来。
+
+    返回 None 表示"不像 URL"。
     """
     if not isinstance(token, str):
         return None
@@ -119,6 +148,8 @@ def _normalize_url_token(token):
     host_part = text.split("/", 1)[0]
     if not host_part:
         return None
+    if positional:
+        return "http://" + text
     if "." in host_part or host_part.lower() == "localhost" or ":" in host_part:
         return "http://" + text
     return None
@@ -232,6 +263,12 @@ def parse_curl_args(argv):
                 # 后者的任何分支，于是"读不到内容"+"argv 不回写"。
                 # 后者更严重：stdin 被 _read 消费后 curl 拿到空内容，
                 # 用户上传的东西静默变空（实测发现）。
+                # 本地选项（-o/-D/-w/--output-dir...）的值只影响本机
+                # 输出，记下槽位，生成 raw_cmd 时替换掉 —— 否则
+                # `curl -o delete.txt http://x/` 会因 raw_cmd 命中而误拦
+                # （实测）。注意只影响**扫描文本**，真实 argv 不动。
+                if flag in _VALUE_FLAGS_LOCAL and slot is not None:
+                    info.setdefault("local_slots", []).append(slot)
                 taken = None
                 if flag in _VALUE_FLAGS_CONFIG:
                     taken = _take_config_stdin(value)
@@ -281,7 +318,7 @@ def parse_curl_args(argv):
     if not info.get("urls"):
         seen = []
         for token in positional:
-            norm = _normalize_url_token(token)
+            norm = _normalize_url_token(token, positional=True)
             if norm and norm not in seen:
                 seen.append(norm)
         # --url 的值和配置里的 url= 都在 extra_urls（含无 scheme 写法）
@@ -343,6 +380,10 @@ def _parse_target_override(flag, value):
 
 
 def _absorb_flag(info, flag, value):
+    if flag in _VALUE_FLAGS_LOCAL:
+        # 消费掉值即可：它只影响本地输出，不是发往目标的内容。
+        # 不消费的话值会变成位置参数（被当成 URL 扫描）—— 实测误报。
+        return
     if flag in _VALUE_FLAGS_METHOD:
         info["method"] = (value or "GET").upper()
     elif flag in _VALUE_FLAGS_URL:
@@ -350,7 +391,14 @@ def _absorb_flag(info, flag, value):
         # 只留最后一个会让 `--url A --next --url B` 丢掉 A（实测绕过）。
         info.setdefault("extra_urls", []).append(value)
     elif flag in _VALUE_FLAGS_HEADER:
-        info["headers"].append(value)
+        # `-H @file`：curl 8.x 支持从文件读头部（一行一个），实测确认
+        # 会真的发出去。只认开头就是 @ 的写法（跟 curl 一致），
+        # 免得把 `X: @foo` 这种值当路径。
+        if isinstance(value, str) and value.startswith("@"):
+            content, _is_file = _read_maybe_file(value)
+            info["headers"].append(content)
+        else:
+            info["headers"].append(value)
         lowered = (value or "").lower()
         if lowered.startswith("cookie:"):
             info["cookie"] += ";" + value.split(":", 1)[1]
@@ -414,7 +462,12 @@ def _absorb_flag(info, flag, value):
         else:
             info["user_agent"] = value
     elif flag in _VALUE_FLAGS_COOKIE:
-        info["cookie"] += ";" + (value or "")
+        # `-b @file` / `-b cookie.txt`：值可能是一个文件（curl 的约定：
+        # 含 = 的当 cookie 串，否则当文件名）。文件内容也要扫。
+        text = value or ""
+        if isinstance(value, str) and value.startswith("@"):
+            text, _is_file = _read_maybe_file(value)
+        info["cookie"] += ";" + text
     elif flag in _VALUE_FLAGS_AUTH:
         info["user"] = value
     elif flag in _VALUE_FLAGS_PROXY:
@@ -434,7 +487,11 @@ def _absorb_flag(info, flag, value):
             # （早先只写不读，是死代码；虽然 misc_values 兜住了扫描面，
             #  但注释承诺了拼接却没做，属于误导。）
             if value:
-                info["extra_query"].append(value)
+                if isinstance(value, str) and value.startswith("@"):
+                    content, _is_file = _read_maybe_file(value)
+                    info["extra_query"].append(content)
+                else:
+                    info["extra_query"].append(value)
         elif flag in ("--connect-to", "--resolve"):
             # 目标改写：解析出"真实连接目标"并记下来
             real = _parse_target_override(flag, value)
@@ -494,7 +551,7 @@ def _take_stdin_value(value, limit=None, strict=True):
     except (OSError, ValueError, AttributeError):
         return None
     if len(data) > limit:
-        if strict:
+        if strict and _STRICT_LIMIT:
             raise BodyTooLarge("stdin body 超过 %d 字节" % limit)
         data = data[:limit]
     if not data:
@@ -626,7 +683,7 @@ def _read_maybe_file(value, limit=None, strict=False):
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             content = fh.read(limit + 1)
         if len(content) > limit:
-            if strict:
+            if strict and _STRICT_LIMIT:
                 raise BodyTooLarge("%s 超过 %d 字节" % (path, limit))
             content = content[:limit]
         return content, True
@@ -661,7 +718,7 @@ def _absorb_config_file(info, path, limit=None, strict=True, depth=0):
     except (OSError, ValueError):
         return
     if len(text) > limit:
-        if strict:
+        if strict and _STRICT_LIMIT:
             raise BodyTooLarge("配置文件 %s 超过 %d 字节" % (p, limit))
         text = text[:limit]
     _absorb_config_text(info, text, depth=depth)
@@ -721,6 +778,12 @@ _CFG_VALUE_FLAGS = {
     "upload-file": "-T", "header": "-H",
     "cookie": "-b", "user-agent": "-A", "referer": "-e",
     "proxy": "-x", "user": "-u", "url-query": "--url-query",
+    # 会**改写连接目标**的选项：漏了它们，配置里写
+    #   connect-to = good.com:443:evil.com:443
+    # 就能把白名单主机改到别处（实测）。进结构化字段后
+    # _build_target 会换成真实主机并写 X-WAF-Real-Host。
+    "connect-to": "--connect-to", "resolve": "--resolve",
+    "interface": "--interface", "request": "-X",
 }
 
 
@@ -805,7 +868,7 @@ def _take_config_stdin(value, limit=None, strict=True):
     except (OSError, ValueError, AttributeError):
         return None
     if len(data) > limit:
-        if strict:
+        if strict and _STRICT_LIMIT:
             raise BodyTooLarge("stdin 配置超过 %d 字节" % limit)
         data = data[:limit]
     if not data:
@@ -933,7 +996,11 @@ def _build_target(argv, info):
         headers.setdefault("X-WAF-Userinfo", userinfo)
         host = real_host
 
-    raw_cmd = "curl " + " ".join(_quote_if_needed(a) for a in argv)
+    masked = list(argv)
+    for slot in info.get("local_slots") or []:
+        if 0 <= slot < len(masked):
+            masked[slot] = "<local>"
+    raw_cmd = "curl " + " ".join(_quote_if_needed(a) for a in masked)
 
     return ScanTarget(
         kind="curl",
@@ -1105,7 +1172,9 @@ def _main_inner(argv):
 
     # 扫描上限与引擎保持一致：扫描过的字节必须等于实际发出去的字节。
     try:
-        set_body_limit(engine.settings.get("max_scan_bytes"))
+        unlocked = engine.unlock_remaining() > 0
+        set_body_limit(engine.settings.get("max_scan_bytes"),
+                       strict=not unlocked)
     except Exception:
         pass
 

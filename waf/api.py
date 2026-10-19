@@ -432,6 +432,20 @@ class Handler(BaseHTTPRequestHandler):
             target.tool = "console"
         else:
             text = str(payload.get("text") or "")
+            # 文本模式也要遵守"扫描字节 = 发送字节"：超限就明确报错，
+            # 而不是只扫前 max_scan_bytes 还显示"未命中"（实测会被
+            # 当成"干净"误导用户）。
+            try:
+                limit = int(engine.settings.get("max_scan_bytes") or 262144)
+            except Exception:
+                limit = 262144
+            if len(text) > limit:
+                self._send_json(
+                    {"success": False, "blocked": True,
+                     "reason": "文本超过扫描上限（%d > %d 字节），未检查"
+                               % (len(text), limit),
+                     "stage": "oversize", "hits": []}, 413)
+                return
             target = ScanTarget(kind="text", method="", url="", path="",
                                 body=text, tool="console")
         verdict = engine.scan(target, log=bool(payload.get("log", True)))

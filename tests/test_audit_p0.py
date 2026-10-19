@@ -748,5 +748,263 @@ class TestRound2ProxyAndConnect(EngineCase):
             proxy_mod.get_engine = saved
 
 
+class TestRound3CurlOptions(CurlCase):
+    """第三轮 #1/#2：@file 命令行 / 本地输出参数。"""
+
+    def test_header_at_file_read(self):
+        hdr = self.write("h.txt", "X-Action: delete\n")
+        _t, info = self.curlshim.parse_curl_args(
+            ["-H", "@" + hdr, "http://127.0.0.1/x"])
+        blob = " ".join(info.get("headers") or [])
+        self.assertIn("delete", blob, "命令行 -H @file 没读文件内容")
+
+    def test_cookie_at_file_read(self):
+        jar = self.write("c.txt", "session=delete\n")
+        _t, info = self.curlshim.parse_curl_args(
+            ["-b", "@" + jar, "http://127.0.0.1/x"])
+        self.assertIn("delete", info.get("cookie") or "",
+                      "命令行 -b @file 没读文件内容")
+
+    def test_url_query_at_file_read(self):
+        frag = self.write("q.txt", "action=delete")
+        _t, info = self.curlshim.parse_curl_args(
+            ["--url-query", "@" + frag, "http://127.0.0.1/x"])
+        self.assertIn("delete", " ".join(info.get("extra_query") or []),
+                      "--url-query @file 没读文件内容")
+
+    def test_local_output_options_not_scanned(self):
+        """-o / -D / -w / --output-dir 的值是本地文件名，不能当请求内容。"""
+        eng = self.make_engine()
+        for argv in (["-o", "delete.txt", "http://127.0.0.1/"],
+                     ["-D", "delete.headers", "http://127.0.0.1/"],
+                     ["--output-dir", "remove", "http://127.0.0.1/"],
+                     ["-w", "%{http_code} delete", "http://127.0.0.1/"]):
+            target, info = self.curlshim.parse_curl_args(argv)
+            verdict = eng.scan(target, log=False)
+            self.assertFalse(verdict.blocked,
+                             "本地输出参数被当成请求内容：%s" % (argv,))
+
+    def test_local_value_is_not_a_url(self):
+        _t, info = self.curlshim.parse_curl_args(
+            ["-o", "1.5", "http://127.0.0.1/x"])
+        urls = info.get("urls") or []
+        self.assertFalse(any("1.5" in u for u in urls),
+                         "-o 的值被当成了 URL：%s" % urls)
+
+
+class TestRound3ConfigSecurityOptions(CurlCase):
+    """第三轮 #3：配置里的 connect-to / resolve 必须进结构化字段。"""
+
+    def test_connect_to_in_config(self):
+        cfg = self.write("cfg.cfg", "connect-to = good.com:443:evil.com:443\n")
+        target, info = self.curlshim.parse_curl_args(
+            ["-K", cfg, "https://good.com/x"])
+        reals = " ".join(info.get("real_hosts") or [])
+        self.assertIn("evil.com", reals,
+                      "配置里的 connect-to 没有被解析：%s" % info)
+
+    def test_resolve_in_config(self):
+        cfg = self.write("cfg2.cfg", "resolve = good.com:443:1.2.3.4\n")
+        target, info = self.curlshim.parse_curl_args(
+            ["-K", cfg, "https://good.com/x"])
+        self.assertIn("1.2.3.4", " ".join(info.get("real_hosts") or []))
+
+
+class TestRound3SingleLabelHost(CurlCase):
+    """第三轮 #4：单标签内网主机（metadata/delete）也是 URL。"""
+
+    def test_single_label_after_next(self):
+        _t, info = self.curlshim.parse_curl_args(
+            ["http://127.0.0.1/x", "--next", "metadata/delete"])
+        urls = info.get("urls") or []
+        self.assertTrue(any("metadata/delete" in u for u in urls),
+                        "单标签主机没进 urls：%s" % urls)
+
+    def test_single_label_not_hidden_by_whitelist(self):
+        eng = self.make_engine([{"id": "A-W", "source": "url",
+                                 "pattern": r"^http://127\.0\.0\.1/",
+                                 "enabled": True, "note": "t"}])
+        target, _info = self.curlshim.parse_curl_args(
+            ["http://127.0.0.1/x", "--next", "metadata/delete"])
+        self.assertTrue(eng.scan(target, log=False).blocked,
+                        "白名单命中了第一个 URL，单标签目标被放过")
+
+
+class TestRound3UnlockAndLimits(EngineCase):
+    """第三轮 #5/#6：unlock 与白名单要能放行超限；文本模式不能假检查。"""
+
+    def test_guard_oversize_allowed_when_unlocked(self):
+        from waf import guard
+        self.make_engine(settings={"max_scan_bytes": 4096})
+        eng = engine_mod.get_engine()
+        eng.unlock_remaining = lambda: 60          # 模拟解锁窗口
+        try:
+            verdict = guard.check_request(method="POST", url="http://t/ok",
+                                          body="a" * 5000, tool="test",
+                                          log=False)
+            self.assertFalse(verdict.blocked, "解锁后仍被超限拒绝")
+        finally:
+            pass
+
+    def test_guard_oversize_allowed_by_allowlist(self):
+        from waf import guard
+        self.make_engine(allowlist=[{"id": "A-BIG", "source": "url",
+                                     "pattern": r"^http://big\.local/",
+                                     "enabled": True, "note": "t"}],
+                         settings={"max_scan_bytes": 4096})
+        verdict = guard.check_request(method="POST",
+                                      url="http://big.local/ok",
+                                      body="a" * 5000, tool="test",
+                                      log=False)
+        self.assertFalse(verdict.blocked, "白名单目标仍被超限拒绝")
+
+    def test_guard_oversize_still_blocked_for_others(self):
+        from waf import guard
+        from waf.models import WafBlocked
+        self.make_engine(settings={"max_scan_bytes": 4096})
+        with self.assertRaises(WafBlocked):
+            guard.check_request(method="POST", url="http://t/ok",
+                                body="a" * 5000, tool="test", log=False)
+
+    def test_cli_text_mode_refuses_oversize(self):
+        from waf import cli
+        self.make_engine(settings={"max_scan_bytes": 4096})
+        args = cli.build_parser().parse_args(["check", "x" * 5000])
+        self.assertEqual(cli.cmd_check(args), 2,
+                         "wafctl check 文本模式对超限文本做了假检查")
+
+
+class TestRound3CompressedBody(EngineCase):
+    """第三轮 #7：压缩请求体要解开再扫；解不了就拒绝。"""
+
+    def _gzip(self, text):
+        import gzip
+        return gzip.compress(text.encode("utf-8"))
+
+    def test_guard_scans_gzip_body(self):
+        from waf import guard
+        from waf.models import WafBlocked
+        self.make_engine()
+        body = self._gzip('{"sql":"delete from users"}')
+        with self.assertRaises(WafBlocked):
+            guard.check_request(method="POST", url="http://t/api",
+                                headers={"Content-Encoding": "gzip"},
+                                body=body, tool="test", log=False)
+
+    def test_guard_rejects_unsupported_encoding(self):
+        from waf import guard
+        from waf.models import WafBlocked
+        self.make_engine()
+        with self.assertRaises(WafBlocked) as ctx:
+            guard.check_request(method="POST", url="http://t/api",
+                                headers={"Content-Encoding": "br"},
+                                body=b"\x00\x01", tool="test", log=False)
+        self.assertEqual(ctx.exception.verdict.stage, "body_encoding")
+
+    def test_guard_allows_gzip_benign(self):
+        from waf import guard
+        self.make_engine()
+        body = self._gzip('{"q":"hello"}')
+        verdict = guard.check_request(method="POST", url="http://t/api",
+                                      headers={"Content-Encoding": "gzip"},
+                                      body=body, tool="test", log=False)
+        self.assertFalse(verdict.blocked)
+
+    def test_codec_limits_and_errors(self):
+        from waf import bodycodec
+        data, status = bodycodec.decode_request_body(b"x", "identity")
+        self.assertEqual((data, status), (b"x", "none"))
+        data, status = bodycodec.decode_request_body(b"not-gzip", "gzip")
+        self.assertEqual(status, "bad")
+        data, status = bodycodec.decode_request_body(b"xx", "zstd")
+        self.assertEqual(status, "unsupported")
+
+
+class TestRound3ProxyCompressed(EngineCase):
+    """第三轮 #7（代理侧）：gzip 体解压后再扫，解不了回 415。"""
+
+    def _start_proxy(self):
+        from waf.proxy import ProxyServer
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        server = ProxyServer(host="127.0.0.1", port=port, mitm=False)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.daemon = True
+        thread.start()
+        time.sleep(0.4)
+        return server, port
+
+    def _send(self, port, payload, timeout=6):
+        sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+        try:
+            sock.sendall(payload)
+            sock.settimeout(timeout)
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+            return data
+        finally:
+            sock.close()
+
+    def test_gzip_body_blocked(self):
+        import gzip
+        body = gzip.compress(b'{"sql":"delete from users"}')
+        server, port = self._start_proxy()
+        try:
+            head = (b"POST http://127.0.0.1/api HTTP/1.1\r\n"
+                    b"Host: 127.0.0.1\r\nContent-Encoding: gzip\r\n"
+                    b"Content-Length: %d\r\n\r\n" % len(body))
+            resp = self._send(port, head + body)
+            status = resp.split(b"\r\n", 1)[0]
+            self.assertIn(b"403", status,
+                          "gzip 压缩的删除载荷没被拦：%r" % status)
+        finally:
+            server.shutdown()
+
+    def test_unsupported_encoding_rejected(self):
+        server, port = self._start_proxy()
+        try:
+            resp = self._send(
+                port,
+                b"POST http://127.0.0.1/api HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\nContent-Encoding: br\r\n"
+                b"Content-Length: 2\r\n\r\nxx")
+            status = resp.split(b"\r\n", 1)[0]
+            self.assertIn(b"415", status,
+                          "无法解码的编码被转发：%r" % status)
+        finally:
+            server.shutdown()
+
+
+class TestRound3PerfSanity(unittest.TestCase):
+    """第三轮性能：按需归一化不能改变结果。"""
+
+    def test_variants_unchanged_for_trigger_chars(self):
+        cases = ["%64elete", "&#100;elete", "\\u0064elete",
+                 "ｄｅｌｅｔｅ", "del\u200bete", "de   lete",
+                 "d_e_l_e_t_e", "DELETE", "drop/**/table"]
+        for text in cases:
+            variants = normalize.build_variants_with_map(
+                text, list(rules.DEFAULT_SETTINGS["normalize"]))
+            texts = [v for _label, v, _m in variants]
+            self.assertTrue(texts, "%r 没有产生任何变体" % text)
+            # 至少有一个变体把干扰字符处理掉了
+            self.assertTrue(
+                any("delete" in t for t in texts)
+                or any("droptable" in t for t in texts),
+                "%r 的变体异常：%s" % (text, texts))
+
+    def test_plain_ascii_skips_fold(self):
+        variants = normalize.build_variants_with_map(
+            "plain text", ["fold_fullwidth", "lower"])
+        # 归一化变体不变；compact 变体（去掉空格）仍会生成 —— 那是设计
+        self.assertEqual(variants[0][1], "plain text")
+
+
 if __name__ == "__main__":
     unittest.main()

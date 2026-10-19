@@ -951,6 +951,16 @@ def cmd_check(args):
             return 2
         target.tool = "check"
     else:
+        # 与代理/guard 一致：超限不做"只扫前 N 字节"的假检查。
+        try:
+            limit = int(engine.settings.get("max_scan_bytes") or 262144)
+        except Exception:
+            limit = 262144
+        if len(raw) > limit:
+            out("拒绝：文本 %d 字节超过扫描上限 %d 字节（未检查）。"
+                "调大 settings.max_scan_bytes 或 unlock 后再试。"
+                % (len(raw), limit))
+            return 2
         target = ScanTarget(kind="text", method="", body=raw, tool="check")
 
     verdict = engine.scan(target, log=not args.no_log)

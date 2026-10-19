@@ -350,6 +350,9 @@ HTTP 请求行"的字节块。手写报文正常写法是一次 `sendall` 发完
 - 代理：Content-Length 或 chunked 超过 32MB → 回 413
 - `-F` / `-T` 的**文件上传内容**仍是"只扫开头"：那是二进制载荷，
   拒绝超大上传会挡住正常的上传测试（明确写在这里，不装作扫全了）
+- **压缩请求体**（`Content-Encoding: gzip` / `deflate`）会先解压再扫；
+  `br` / `zstd` / 数据损坏 / 解压后超过 8MB → **拒绝**（无法检查的内容不转发）
+- `wafctl unlock` 窗口内，超限不再拒绝（退回"只扫前 N 字节"）
 
 要放宽改 `data/config.json`：`{"max_scan_bytes": 1048576}`
 （1MB；注意判定耗时随之上升）。正常挖洞的请求体远小于 256KB。
@@ -628,7 +631,7 @@ wafctl install-path --machine          # 机器级（需管理员，全局生效
 wafctl uninstall-path                  # 卸载：移除接入 + 复核最终状态
 wafctl uninstall-path --purge-data     # 顺带删 data（记录/规则/证书，不可逆）
 
-wafctl test                            # 跑自测（339 项）
+wafctl test                            # 跑自测（360 项）
 ```
 
 ---
@@ -721,7 +724,7 @@ hunt-guard\                ← 你解压/克隆出来的目录，名字随意
 ├── docs\DESIGN.md         框架设计说明
 ├── CHANGELOG.md           更新记录
 ├── .github\workflows\     CI（三平台 × 两 Python 版本）
-└── tests\                 自测（339 项）
+└── tests\                 自测（360 项）
 ```
 
 ---
@@ -924,5 +927,5 @@ python3 waf/cli.py stop
 
 ## 更新记录
 
-见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **1.1.10**
+见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **1.1.11**
 （拦截面与安全修复较多，建议升级后跑一次 `wafctl install-path --force`）。
