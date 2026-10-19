@@ -95,21 +95,75 @@ class EchoServer(object):
             pass
 
 
+# 会被 guard 覆盖的全部补丁点 + 快照/还原助手。
+#
+# 必须覆盖**全部**补丁点：漏一个，这个补丁就一直留在进程里，后面的
+# 测试文件（test_waf_core 的 API 用例会往控制台发带 delete 的载荷）
+# 就会被它拦掉 —— 实测表现为"单独跑全绿、一起跑 2 个 ERROR"。
+# 教训：装/还补丁的测试都要用同一份清单，别各写各的。
+GUARD_TARGETS = (
+    "socket.socket.sendall",
+    "socket.socket.send",
+    "http.client.HTTPConnection._send_request",
+    "http.client.HTTPConnection.putrequest",
+    "http.client.HTTPConnection.endheaders",
+    "urllib.request.urlopen",
+    "urllib.request.OpenerDirector.open",
+    "requests.Session.send",
+    "requests.request",
+    "urllib3.connectionpool.HTTPConnectionPool.urlopen",
+    "httpx.Client.request",
+    "httpx.AsyncClient.request",
+    "aiohttp.ClientSession._request",
+)
+
+
+def _resolve_owner(path):
+    """把 "pkg.mod.Attr" / "pkg.Class.attr" 解析成 (宿主对象, 属性名)。
+
+    要点：**宿主**才是要打补丁的对象。逐段尝试做 import（从长到短），
+    剩下的段当属性走 —— 这样 ``socket.socket.sendall``（宿主是类）
+    和 ``urllib.request.urlopen``（宿主是模块）都能正确解析。
+    早先用 ``__import__``/单次 rpartition，对这两种形态都解析不出来，
+    于是快照被静默跳过、补丁一直留在进程里（实测 2 个 ERROR）。
+    """
+    module_path, _, name = path.rpartition(".")
+    if not module_path:
+        return None, name
+    import importlib
+    parts = module_path.split(".")
+    for index in range(len(parts), 0, -1):
+        try:
+            obj = importlib.import_module(".".join(parts[:index]))
+        except ImportError:
+            continue
+        for attr in parts[index:]:
+            obj = getattr(obj, attr, None)
+            if obj is None:
+                return None, name
+        return obj, name
+    return None, name
+
+
+def snapshot_guard_targets():
+    saved = []
+    for path in GUARD_TARGETS:
+        owner, name = _resolve_owner(path)
+        if owner is not None and hasattr(owner, name):
+            saved.append((owner, name, getattr(owner, name)))
+    return saved
+
+
+def restore_guard_targets(saved):
+    for obj, name, value in saved:
+        try:
+            setattr(obj, name, value)
+        except Exception:
+            pass
+
+
 class TransportBase(unittest.TestCase):
     """装补丁 → 跑断言 → 还原补丁（不污染同进程其它用例）。"""
-
-    # 会被 guard 覆盖的入口，全部快照下来
-    TARGETS = (
-        (socket.socket, "sendall"),
-        (socket.socket, "send"),
-        ("http.client.HTTPConnection", "_send_request"),
-        ("http.client.HTTPConnection", "putrequest"),
-        ("http.client.HTTPConnection", "endheaders"),
-        ("urllib.request", "urlopen"),
-        ("urllib.request.OpenerDirector", "open"),
-        ("requests.Session", "send"),
-        ("requests", "request"),
-    )
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="agentwaf-tp-")
@@ -125,12 +179,7 @@ class TransportBase(unittest.TestCase):
             os.environ[key] = value
         engine_mod._ENGINE = None
 
-        self._snapshot = []
-        for owner, name in self.TARGETS:
-            obj = self._resolve(owner)
-            if obj is None or not hasattr(obj, name):
-                continue
-            self._snapshot.append((obj, name, getattr(obj, name)))
+        self._snapshot = snapshot_guard_targets()
 
         guard._installed = False
         guard.install_guard(patch_subprocess=False)
@@ -138,11 +187,7 @@ class TransportBase(unittest.TestCase):
 
     def tearDown(self):
         self.server.close()
-        for obj, name, value in self._snapshot:
-            try:
-                setattr(obj, name, value)
-            except Exception:
-                pass
+        restore_guard_targets(self._snapshot)
         guard._installed = False
         for key, value in self._env_backup.items():
             if value is None:
@@ -154,11 +199,28 @@ class TransportBase(unittest.TestCase):
 
     @staticmethod
     def _resolve(path):
+        """把 "package.module" / "package.module.Attr" 解析成对象。
+
+        早先用 ``__import__(module_name)``：对 "urllib.request" 它返回的是
+        顶层 ``urllib``，``getattr(urllib, "urlopen")`` 是 None —— 快照
+        被静默跳过，urllib 的补丁一直没还原。必须用 importlib 拿到
+        **子模块**本身。
+        """
         if not isinstance(path, str):
             return path
-        module_name, _, attr = path.partition(".")
+        module_name, _, attr = path.rpartition(".")
+        if not module_name:
+            return None
+        import importlib
+        module = None
+        # 先按"整条都是模块"试，再退一格当成 Attr
         try:
-            module = __import__(module_name)
+            module = importlib.import_module(path)
+            return module
+        except ImportError:
+            pass
+        try:
+            module = importlib.import_module(module_name)
         except ImportError:
             return None
         return getattr(module, attr, None)
@@ -651,14 +713,14 @@ class TestAutohookPatchDetection(unittest.TestCase):
             self.skipTest("requests 未安装")
         from waf import autohook
 
-        snapshot = requests.Session.send
+        snapshot = snapshot_guard_targets()
         try:
             guard._installed = False
             guard.install_guard(patch_subprocess=False)
             self.assertTrue(autohook._requests_ready(),
                             "_requests_ready() 看不到已经装好的补丁")
         finally:
-            requests.Session.send = snapshot
+            restore_guard_targets(snapshot)
             guard._installed = False
 
 

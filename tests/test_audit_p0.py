@@ -182,9 +182,12 @@ class TestDefaultCurlrc(EngineCase):
     def test_default_rc_is_part_of_scan_surface(self):
         self._write_rc("url = http://victim/delete\n")
         target, info = self.curlshim.parse_curl_args(["http://127.0.0.1/x"])
-        blob = "\n".join(info.get("config_parts") or [])
+        # 有效值进 config_urls / urls（原文本不再整段进扫描面 ——
+        # 那会把注释也当成请求内容，见第二轮 #7）
+        blob = " ".join(list(info.get("config_urls") or [])
+                        + list(info.get("urls") or []))
         self.assertIn("victim/delete", blob,
-                      "默认 .curlrc 没进扫描面：%r" % info.get("config_parts"))
+                      "默认 .curlrc 没进扫描面：%r" % blob)
 
     def test_default_rc_actually_blocks(self):
         self._write_rc("url = http://victim/delete\n")
@@ -197,7 +200,8 @@ class TestDefaultCurlrc(EngineCase):
         self._write_rc("url = http://victim/delete\n")
         _target_obj, info = self.curlshim.parse_curl_args(
             ["-q", "http://127.0.0.1/x"])
-        blob = "\n".join(info.get("config_parts") or [])
+        blob = " ".join(list(info.get("config_urls") or [])
+                        + list(info.get("urls") or []))
         self.assertNotIn("victim/delete", blob,
                          "-q 时 curl 不读默认配置，我们也不该读")
 
@@ -477,6 +481,267 @@ class TestProxyHardening(EngineCase):
                 self.assertIn(b"403", status,
                               "引擎异常时代理放行了：%r" % status)
                 self.assertIn(b"X-HuntGuard", resp)
+            finally:
+                server.shutdown()
+        finally:
+            proxy_mod.get_engine = saved
+
+
+class CurlCase(EngineCase):
+    """curl 解析类用例的公共部分：隔离 HOME，避免读开发机自己的 .curlrc。"""
+
+    def setUp(self):
+        super().setUp()
+        from waf import curlshim
+        self.curlshim = curlshim
+        self._paths = {}
+        for key in ("HOME", "USERPROFILE", "APPDATA", "CURL_HOME",
+                    "XDG_CONFIG_HOME"):
+            self._paths[key] = os.environ.get(key)
+            os.environ.pop(key, None)
+        os.environ["HOME"] = self.tmp
+
+    def tearDown(self):
+        for key, value in self._paths.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        super().tearDown()
+
+    def write(self, name, text):
+        path = os.path.join(self.tmp, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return path
+
+
+class TestRound2HostMultiUrl(EngineCase):
+    """第二轮 #1：多 URL 时 host 白名单要生效（额外 URL 也要按 host 判）。"""
+
+    def test_host_entry_covers_extra_urls(self):
+        eng = self.make_engine([{"id": "A-H5", "source": "host",
+                                 "pattern": r"^lab\.local$",
+                                 "enabled": True, "note": "t"}])
+        target = _target("http://lab.local/a")
+        target.meta["urls"] = ["http://lab.local/a",
+                              "http://lab.local/delete"]
+        verdict = eng.scan(target, log=False)
+        self.assertFalse(verdict.blocked,
+                         "多 URL 下 host 白名单又失效了：%s" % verdict.reason)
+
+    def test_other_host_still_blocked(self):
+        eng = self.make_engine([{"id": "A-H6", "source": "host",
+                                 "pattern": r"^lab\.local$",
+                                 "enabled": True, "note": "t"}])
+        target = _target("http://lab.local/a")
+        target.meta["urls"] = ["http://lab.local/a",
+                              "http://evil.local/delete"]
+        self.assertTrue(eng.scan(target, log=False).blocked,
+                        "第二个 URL 不在白名单却被放行")
+
+
+class TestRound2SchemeLessUrl(CurlCase):
+    """第二轮 #2：不带 scheme 的 URL 也是 URL（curl 默认按 http 处理）。"""
+
+    def test_detected_after_next(self):
+        _t, info = self.curlshim.parse_curl_args(
+            ["http://127.0.0.1/x", "--next", "victim.local/delete"])
+        urls = info.get("urls") or []
+        self.assertTrue(any("victim.local/delete" in u for u in urls),
+                        "无 scheme 的 URL 没进 urls：%s" % urls)
+
+    def test_whitelist_does_not_hide_it(self):
+        eng = self.make_engine([{"id": "A-S", "source": "url",
+                                 "pattern": r"^http://127\.0\.0\.1/",
+                                 "enabled": True, "note": "t"}])
+        target, _info = self.curlshim.parse_curl_args(
+            ["http://127.0.0.1/x", "--next", "victim.local/delete"])
+        self.assertTrue(eng.scan(target, log=False).blocked,
+                        "白名单命中了第一个 URL，无 scheme 的目标被放过")
+
+    def test_plain_word_is_not_a_url(self):
+        self.assertIsNone(self.curlshim._normalize_url_token("notaurl"))
+        self.assertIsNone(self.curlshim._normalize_url_token("-d"))
+
+
+class TestRound2ConfigValues(CurlCase):
+    """第二轮 #3/#4/#7：配置文件里的 URL / 文件引用 / 注释。"""
+
+    def _rc(self, text):
+        return self.write(".curlrc", text)
+
+    def test_config_url_merged_into_urls(self):
+        self._rc("url = http://victim/delete\n")
+        _t, info = self.curlshim.parse_curl_args(["http://127.0.0.1/x"])
+        urls = info.get("urls") or []
+        self.assertTrue(any("victim/delete" in u for u in urls),
+                        "配置里的 url 没进 urls：%s" % urls)
+
+    def test_config_url_not_hidden_by_whitelist(self):
+        self._rc("url = http://victim/delete\n")
+        eng = self.make_engine([{"id": "A-C", "source": "url",
+                                 "pattern": r"^http://127\.0\.0\.1/",
+                                 "enabled": True, "note": "t"}])
+        target, _info = self.curlshim.parse_curl_args(["http://127.0.0.1/x"])
+        self.assertTrue(eng.scan(target, log=False).blocked,
+                        "白名单命中命令行 URL，配置里的目标没检查")
+
+    def test_config_data_file_reference_reads_content(self):
+        payload = self.write("payload.txt", "action=delete")
+        cfg = self.write("cfg.txt", 'data = "@%s"\n' % payload)
+        _t, info = self.curlshim.parse_curl_args(
+            ["-K", cfg, "http://127.0.0.1/x"])
+        blob = "\n".join(info.get("body_parts") or [])
+        self.assertIn("action=delete", blob,
+                      "配置里的 data=@file 只扫了路径字符串")
+
+    def test_config_header_file_reference_reads_content(self):
+        hdr = self.write("hdr.txt", "X-Action: delete\n")
+        cfg = self.write("cfg2.txt", 'header = "@%s"\n' % hdr)
+        _t, info = self.curlshim.parse_curl_args(
+            ["-K", cfg, "http://127.0.0.1/x"])
+        blob = "\n".join(info.get("headers") or [])
+        self.assertIn("delete", blob, "配置里的 header=@file 没读内容")
+
+    def test_nested_config_is_followed(self):
+        inner = self.write("inner.cfg", "url = http://victim/delete\n")
+        outer = self.write("outer.cfg", "config = %s\n" % inner)
+        _t, info = self.curlshim.parse_curl_args(
+            ["-K", outer, "http://127.0.0.1/x"])
+        urls = " ".join(info.get("urls") or []) + " " + \
+               " ".join(info.get("config_urls") or [])
+        self.assertIn("victim/delete", urls, "嵌套 config 没有被跟进")
+
+    def test_comments_are_not_scanned(self):
+        """第二轮 #7：注释里的 remove/delete 不能把正常 curl 全拦掉。"""
+        self._rc("# do not remove this comment\nsilent\n")
+        eng = self.make_engine()
+        target, _info = self.curlshim.parse_curl_args(["http://example.com/"])
+        self.assertFalse(eng.scan(target, log=False).blocked,
+                         "curlrc 注释导致误拦")
+
+    def test_unknown_options_ignored_but_values_scanned(self):
+        self._rc("user-agent = 'something with delete in it'\n")
+        _t, info = self.curlshim.parse_curl_args(["http://example.com/"])
+        # -A 是已知选项 → 值要进扫描面（这里只断言没崩、且不误判为 URL）
+        self.assertEqual(info.get("url"), "http://example.com/")
+
+
+class TestRound2ConfigStdin(CurlCase):
+    """第二轮 #6：`-K -` 也要遵守扫描上限，不能静默截断。"""
+
+    def test_oversize_config_stdin_refused(self):
+        class _FakeStdin(object):
+            class buffer(object):
+                @staticmethod
+                def read(size):
+                    return b"silent\n" * 2000
+
+        self.curlshim.set_body_limit(4096)
+        saved = sys.stdin
+        sys.stdin = _FakeStdin()
+        try:
+            with self.assertRaises(self.curlshim.BodyTooLarge):
+                self.curlshim.parse_curl_args(["-K", "-", "http://t/x"])
+        finally:
+            sys.stdin = saved
+            self.curlshim.set_body_limit(262144)
+
+
+class TestRound2UnifiedLimit(EngineCase):
+    """第二轮 #5：guard / 代理与引擎用同一个扫描上限。"""
+
+    def test_guard_rejects_oversize_body(self):
+        self.make_engine(settings={"max_scan_bytes": 4096})
+        from waf import guard
+        from waf.models import WafBlocked
+        try:
+            guard.check_request(method="POST", url="http://t/ok",
+                                body="a" * 5000, tool="test", log=False)
+        except WafBlocked as exc:
+            self.assertEqual(exc.verdict.stage, "oversize")
+            self.assertIn("扫描上限", exc.verdict.reason)
+        else:
+            self.fail("guard 把超限 body 完整放行了")
+
+    def test_guard_accepts_body_within_limit(self):
+        self.make_engine(settings={"max_scan_bytes": 4096})
+        from waf import guard
+        verdict = guard.check_request(method="POST", url="http://t/ok",
+                                      body="a" * 100, tool="test", log=False)
+        self.assertFalse(verdict.blocked)
+
+
+class TestRound2ProxyAndConnect(EngineCase):
+    """第二轮 #5/#8：代理上限一致；CONNECT 引擎异常不再 fail-open。"""
+
+    def _start_proxy(self):
+        from waf.proxy import ProxyServer
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        server = ProxyServer(host="127.0.0.1", port=port, mitm=False)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.daemon = True
+        thread.start()
+        time.sleep(0.4)
+        return server, port
+
+    def _raw(self, port, payload, timeout=6):
+        sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+        try:
+            sock.sendall(payload)
+            sock.settimeout(timeout)
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+            return data
+        finally:
+            sock.close()
+
+    def test_proxy_rejects_body_over_scan_limit(self):
+        self.make_engine(settings={"max_scan_bytes": 8192})
+        server, port = self._start_proxy()
+        try:
+            resp = self._raw(
+                port,
+                b"POST http://127.0.0.1/x HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\nContent-Length: 9000\r\n\r\n")
+            status = resp.split(b"\r\n", 1)[0]
+            self.assertIn(b"413", status,
+                          "超过扫描上限的 body 没有被拒绝：%r" % status)
+        finally:
+            server.shutdown()
+
+    def test_connect_engine_error_is_fail_closed(self):
+        import waf.proxy as proxy_mod
+
+        class Boom(object):
+            settings = {"fail_mode": "closed"}
+
+            def scan(self, target, log=True):
+                raise RuntimeError("boom")
+
+            def enabled(self):
+                return True
+
+        saved = proxy_mod.get_engine
+        proxy_mod.get_engine = lambda: Boom()
+        try:
+            server, port = self._start_proxy()
+            try:
+                resp = self._raw(
+                    port,
+                    b"CONNECT example.com:443 HTTP/1.1\r\n"
+                    b"Host: example.com:443\r\n\r\n")
+                status = resp.split(b"\r\n", 1)[0]
+                self.assertIn(b"403", status,
+                              "CONNECT 在引擎异常时被放行：%r" % status)
             finally:
                 server.shutdown()
         finally:

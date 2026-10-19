@@ -512,9 +512,13 @@ class RuleEngine(object):
                 if self._url_allowed_any("//" + h):
                     continue
                 host_mismatch.append(h)
+            # 额外 URL 的判定要同时看 url / host 两种 source
+            # （实测 bug：只看 source=url，于是 host 白名单下
+            #  `curl http://lab.local/a --next http://lab.local/delete`
+            #   被误拦 —— 单 URL 修好了，多 URL 又失效）。
             extra = [u for u in all_urls
                      if u and u != target.url
-                     and not self._url_allowed_any(u)]
+                     and not self._url_or_host_allowed(u)]
             if not extra and not host_mismatch:
                 suppressed.append({
                     "source": "request",
@@ -529,7 +533,23 @@ class RuleEngine(object):
                                mode=global_mode, unlocked=unlocked)
             # 有 URL 不在白名单里 → 不豁免，继续扫（raw_cmd 会带出它们）
 
-        for source, raw_text in target.fields():
+        # meta["urls"]（curl 的多个 --url / --next / 配置文件里的 url）
+        # 也要进扫描面。早先它只用于"是否全部在白名单"的判定，
+        # 没有 raw_cmd 的调用方（代理 / guard 构造的 target）里
+        # 这些 URL 干脆不会被扫到（实测：第二个 URL 不在白名单，
+        # 请求却因为第一个 URL 命中白名单而放行）。
+        scan_fields = target.fields()
+        extra_urls = []
+        try:
+            for item in (target.meta or {}).get("urls") or []:
+                if item and item != target.url and item not in extra_urls:
+                    extra_urls.append(str(item))
+        except Exception:
+            extra_urls = []
+        if extra_urls:
+            scan_fields.append(("url", chr(10).join(extra_urls)))
+
+        for source, raw_text in scan_fields:
             if source == "headers" and not scan_headers:
                 continue
             if not raw_text:
@@ -615,6 +635,22 @@ class RuleEngine(object):
             except Exception:
                 continue
         return False
+
+    def _url_or_host_allowed(self, url):
+        """URL 是否被**任一**请求级条目放行（url 按整条、host 按主机名）。"""
+        if not url:
+            return False
+        if self._url_allowed_any(url):
+            return True
+        host = ""
+        try:
+            from urllib.parse import urlsplit
+            host = urlsplit(url).netloc or ""
+        except Exception:
+            host = ""
+        if not host:
+            return False
+        return self._host_allowed_any(host)
 
     def _url_allowed_any(self, url):
         """这个 URL 是否命中任一条 url/host 类型的白名单。"""

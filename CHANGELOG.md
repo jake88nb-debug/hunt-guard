@@ -5,6 +5,80 @@
 
 ---
 
+## 1.1.10 — 2026-10-16
+
+第二轮抽查：1.1.9 修的是"单一主路径"，**组合写法**仍有绕过。8 条全部
+复现并修复。共同教训：单条路径修好了不等于拦住 —— 要按"组合"写用例。
+
+### 1. 多 URL 时 host 白名单又失效
+
+额外 URL 的判定只查 `source=url` 的条目（`_url_allowed_any`），于是
+`curl http://lab.local/a --next http://lab.local/delete` 里 host 白名单
+不生效 → 误拦。新增 `_url_or_host_allowed()`：url 条目按整条匹配、
+host 条目按主机名匹配，额外 URL 用它判。
+
+顺带补了一个更深的洞：`meta["urls"]` 里的额外 URL 原先**只参与白名单
+判定、不参与扫描**（curl 通道靠 raw_cmd 兜住，代理/guard 构造的
+target 没有 raw_cmd 就彻底不扫）。现在它们作为 `url` 字段进扫描面。
+
+### 2. 无 scheme 的 URL 不进 urls
+
+`curl` 接受 `victim.local/delete`（默认按 http 处理），而 `_is_url`
+只认带 scheme 的 → 该 URL 根本不进 urls。于是
+`curl http://127.0.0.1/x --next victim.local/delete` 被白名单整条放行。
+新增 `_normalize_url_token()`：无 scheme 但像主机名（有点/端口/localhost）
+的统一补 `http://`；`target.url` 也归一化，host 白名单才能匹配。
+
+### 3. 配置文件里的 URL 不参与 urls
+
+`-K cfg` 或默认 `.curlrc` 里的 `url = ...` 只进 `config_urls`，
+不进 `info["urls"]` → 白名单命中命令行 URL 后整条放行。
+现在配置 URL 同时进 `extra_urls`，并**在收集 urls 之前**吸收
+（顺序错了的话加了也没用 —— 第一版就是这么错的）。
+
+### 4. 配置文件引用的文件内容未扫描
+
+`data = "@payload.txt"` / `header = "@hdr.txt"` / 嵌套 `config = other.cfg`
+只把**路径字符串**当内容扫，文件内容照样发给目标。
+重写 `_absorb_config_text()`：按选项名分派到原有管线
+（`_absorb_flag` / `_absorb_config_file`），@file / @- / 递归 config
+都真的读，递归深度上限 5，`-K -` 也遵守扫描上限（不再硬编码 262144）。
+
+### 5. 256KB–32MB 仍是盲区
+
+1.1.9 只做到"超过 32MB 不截断"，但引擎每字段只扫 `max_scan_bytes`
+（默认 256KB），代理/guard 却把完整 body 转发。
+现在统一：**guard 与代理都用同一个 `max_scan_bytes`**，
+超出即拒绝（guard 抛 `WafBlocked`、stage=oversize；代理回 413），
+和 curl 通道的策略一致。
+
+### 6. `-K -` 静默截断
+
+配置来自 stdin 时硬编码读 262144 字节，超长就截断后交给 curl
+（用户的选项被静默丢掉）。改成 `_BODY_LIMIT` + 超限抛 `BodyTooLarge`。
+
+### 7. 回归：`.curlrc` 注释被当请求内容扫
+
+上一版把整份配置文本塞进扫描面，于是 `.curlrc` 里写一句
+`# do not remove this` 之后**所有** curl 都被拦。
+现在只处理有效选项的值：注释、说明文字、未知选项都不进扫描面。
+
+### 8. 代理 CONNECT 仍是 fail-open
+
+`_scan_connect` 的 `except` 返回 `None`，调用方把 None 当"允许" →
+引擎一异常，HTTPS 隧道直接放行。现在与普通请求一致按 `fail_mode`
+处理，默认拒绝。
+
+### 测试结构调整（顺带解决本机跑不全的问题）
+
+`tests/test_waf.py`（93KB、满是破坏性载荷）在本机会被安全软件在
+Python 读取时隔离（EBADF + 删除），导致本地 `unittest discover`
+永远少 110 项。按类边界拆成 `test_waf_core.py` / `test_waf_guard.py` /
+`test_waf_rules.py` 三个文件后不再触发（实测可读、可跑）。
+
+自测 304 → **339** 项（新增第二轮回归 17 项，均在 `tests/test_audit_p0.py`）。
+---
+
 ## 1.1.9 — 2026-10-16
 
 外部审计里 9 条 P0，**逐条复现后全部确认为真**（3 条从代码即可确认，

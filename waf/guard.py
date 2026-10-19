@@ -270,6 +270,28 @@ def check_request(method="GET", url="", headers=None, body="", params=None,
 def _check_request_inner(method, url, headers, body, tool, log):
     from urllib.parse import urlsplit
 
+    # 扫描字节 = 发送字节：body 超过扫描上限时**拒绝**，而不是
+    # 只扫前 max_scan_bytes 就把完整 body 发出去（实测：payload 放在
+    # 上限之后即可绕过代理 / Python 客户端）。curl 通道有同一套策略
+    # （见 curlshim.BodyTooLarge），这里保持一致。
+    try:
+        from waf.engine import get_engine as _get_engine
+        _limit = int(_get_engine().settings.get("max_scan_bytes") or 262144)
+    except Exception:
+        _limit = 262144
+    body_text = body if isinstance(body, str) else _safe_body(body)
+    if len(body_text) > _limit:
+        from waf.models import Verdict
+        verdict = Verdict(
+            blocked=True,
+            reason="请求体超过扫描上限（%d > %d 字节），拒绝发送"
+                   % (len(body_text), _limit),
+            stage="oversize", hits=[], mode="block", tool=tool,
+        )
+        _stats["blocked"] += 1
+        _print_block(verdict)
+        raise WafBlocked(verdict)
+
     host = path = query = ""
     try:
         parts = urlsplit(url)

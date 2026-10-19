@@ -628,7 +628,7 @@ wafctl install-path --machine          # 机器级（需管理员，全局生效
 wafctl uninstall-path                  # 卸载：移除接入 + 复核最终状态
 wafctl uninstall-path --purge-data     # 顺带删 data（记录/规则/证书，不可逆）
 
-wafctl test                            # 跑自测（304 项）
+wafctl test                            # 跑自测（339 项）
 ```
 
 ---
@@ -721,7 +721,7 @@ hunt-guard\                ← 你解压/克隆出来的目录，名字随意
 ├── docs\DESIGN.md         框架设计说明
 ├── CHANGELOG.md           更新记录
 ├── .github\workflows\     CI（三平台 × 两 Python 版本）
-└── tests\                 自测（304 项）
+└── tests\                 自测（339 项）
 ```
 
 ---
@@ -924,5 +924,5 @@ python3 waf/cli.py stop
 
 ## 更新记录
 
-见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **1.1.9**
+见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **1.1.10**
 （拦截面与安全修复较多，建议升级后跑一次 `wafctl install-path --force`）。

@@ -1181,7 +1181,9 @@ def cmd_test(args):
     # 关键是**跑之前和跑之后都看**：隔离通常发生在 unittest 真的去读
     # 文件的瞬间，跑之前文件还在，提示不会触发 —— 只能在跑完后发现
     # "刚才还在、现在没了"。
-    watched = ("test_waf.py", "test_channels.py", "test_transport.py")
+    watched = ("test_waf_core.py", "test_waf_guard.py",
+               "test_waf_rules.py", "test_channels.py",
+               "test_transport.py")
 
     def _missing():
         return [name for name in watched

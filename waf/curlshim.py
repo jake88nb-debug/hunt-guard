@@ -94,6 +94,36 @@ def set_body_limit(limit):
         _BODY_LIMIT = value
 
 
+def _normalize_url_token(token):
+    """把 curl 接受的"URL"归一化成可比较形式。
+
+    curl 允许不带 scheme（``curl victim.local/delete`` 默认按 http 处理），
+    早先 _is_url 只认带 scheme 的，于是
+        curl http://127.0.0.1/x --next victim.local/delete
+    里第二个 URL 根本不进 urls —— 白名单命中第一个后整个请求免检。
+    返回 None 表示"不像 URL"（纯选项、纯文本参数）。
+    """
+    if not isinstance(token, str):
+        return None
+    text = token.strip()
+    if not text or text.startswith("-") or " " in text or "	" in text:
+        return None
+    low = text.lower()
+    if low.startswith(("http://", "https://", "ftp://", "ftps://",
+                       "sftp://", "scp://", "file://", "smb://",
+                       "ldap://", "gopher://", "dict://", "tftp://",
+                       "ws://", "wss://")):
+        return text
+    if "://" in text:
+        return None
+    host_part = text.split("/", 1)[0]
+    if not host_part:
+        return None
+    if "." in host_part or host_part.lower() == "localhost" or ":" in host_part:
+        return "http://" + text
+    return None
+
+
 def _is_url(token):
     low = token.lower()
     if low.startswith(("http://", "https://", "ftp://", "ftps://",
@@ -231,6 +261,13 @@ def parse_curl_args(argv):
     if not info["url"] and positional:
         info["url"] = positional[0]
 
+    # curl 会自动读默认配置文件（没有 -q 时）—— 那里藏的 URL/参数
+    # 同样要进扫描面（实测绕过，见 _default_config_paths）。
+    if not info.get("no_default_config"):
+        for cfg_path in _default_config_paths():
+            if os.path.isfile(cfg_path):
+                _absorb_config_file(info, cfg_path)
+
     # 收集全部 URL（含 --next 之后的、以及多个 --url / 位置参数）。
     #
     # 为什么必须全部收（实测发现的绕过）：
@@ -244,21 +281,24 @@ def parse_curl_args(argv):
     if not info.get("urls"):
         seen = []
         for token in positional:
-            if _is_url(token) and token not in seen:
-                seen.append(token)
+            norm = _normalize_url_token(token)
+            if norm and norm not in seen:
+                seen.append(norm)
+        # --url 的值和配置里的 url= 都在 extra_urls（含无 scheme 写法）
         for token in (info.get("extra_urls") or []):
-            if token and _is_url(token) and token not in seen:
-                seen.append(token)
-        if info["url"] and info["url"] not in seen:
-            seen.insert(0, info["url"])
+            norm = _normalize_url_token(token)
+            if norm and norm not in seen:
+                seen.append(norm)
+        if info["url"]:
+            norm = _normalize_url_token(info["url"]) or info["url"]
+            if norm not in seen:
+                seen.insert(0, norm)
         info["urls"] = seen
+    # 主 URL 也归一化：无 scheme 时让 urlsplit 能拆出 host，
+    # 否则 host 白名单（source=host）匹配不到。
+    if info["url"]:
+        info["url"] = _normalize_url_token(info["url"]) or info["url"]
 
-    # curl 会自动读默认配置文件（没有 -q 时）—— 那里藏的 URL/参数
-    # 同样要进扫描面（实测绕过，见 _default_config_paths）。
-    if not info.get("no_default_config"):
-        for cfg_path in _default_config_paths():
-            if os.path.isfile(cfg_path):
-                _absorb_config_file(info, cfg_path)
 
     if info["has_body"] and info["method"] == "GET":
         info["method"] = "POST"          # curl 的隐式行为
@@ -594,7 +634,7 @@ def _read_maybe_file(value, limit=None, strict=False):
         return value, False
 
 
-def _absorb_config_file(info, path, limit=None, strict=True):
+def _absorb_config_file(info, path, limit=None, strict=True, depth=0):
     """把 curl 配置文件的内容也纳入扫描面。
 
     格式是每行 `option = value`（或 `option value`），注释以 # 开头。
@@ -624,7 +664,7 @@ def _absorb_config_file(info, path, limit=None, strict=True):
         if strict:
             raise BodyTooLarge("配置文件 %s 超过 %d 字节" % (p, limit))
         text = text[:limit]
-    _absorb_config_text(info, text)
+    _absorb_config_text(info, text, depth=depth)
 
 
 def _default_config_paths():
@@ -670,16 +710,42 @@ def _default_config_paths():
     return paths
 
 
-def _absorb_config_text(info, text):
-    """把一份配置文本纳入扫描面（文件与 stdin 两条路共用）。"""
-    if not text:
+# curl 配置文件里"值是文件/stdin/嵌套配置"的选项。
+# 漏一个就是一条绕过：实测 data = "@payload.txt" 只把路径字符串当
+# body 扫，文件内容照样发给目标。
+_CFG_VALUE_FLAGS = {
+    "url": "--url", "request-target": "--url",
+    "data": "-d", "data-raw": "-d", "data-binary": "-d",
+    "data-ascii": "-d", "json": "--json", "data-urlencode": "-d",
+    "form": "-F", "form-string": "-F",
+    "upload-file": "-T", "header": "-H",
+    "cookie": "-b", "user-agent": "-A", "referer": "-e",
+    "proxy": "-x", "user": "-u", "url-query": "--url-query",
+}
+
+
+def _absorb_config_text(info, text, depth=0):
+    """把一份 curl 配置纳入扫描面（文件与 stdin 两条路共用）。
+
+    两条实测过的坑：
+
+    1. **注释不能扫**（误报）：早先把整份文本塞进扫描面，用户在
+       .curlrc 里写一句 `# do not remove this`，之后**所有** curl
+       都被拦。现在只处理有效选项的值，注释/说明文字不进扫描面。
+    2. **值里的文件引用要真的读**（绕过）：`data = "@payload.txt"`
+       只把路径当 body 扫，文件内容直奔目标。现在统一交给
+       _absorb_flag —— 它负责 @file / @- / 上限检查。
+
+    递归深度设上限，避免 config 互相引用打转。
+    """
+    if not text or depth > 5:
         return
-    info["config_parts"].append(text)
-    # 尽量把 url=/data= 也提取出来，让 URL 规则能命中
-    for line in text.splitlines():
-        line = line.strip()
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
+        if line.startswith("--"):
+            line = line[2:]
         if "=" in line:
             key, val = line.split("=", 1)
         else:
@@ -687,29 +753,61 @@ def _absorb_config_text(info, text):
             if len(parts) != 2:
                 continue
             key, val = parts
-        key = key.strip().lstrip("-")
-        val = val.strip().strip('"')
-        if key in ("url", "data", "data-raw", "data-binary", "data-ascii",
-                   "json", "upload-file", "request-target", "url-query",
-                   "data-urlencode"):
-            if key in ("url", "request-target"):
-                info["config_urls"].append(val)
+        key = key.strip().lstrip("-").lower()
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+            val = val[1:-1]
+        if not val:
+            continue
+        if key == "config":
+            _absorb_config_file(info, val, depth=depth + 1)
+            continue
+        flag = _CFG_VALUE_FLAGS.get(key)
+        if not flag:
+            continue                    # 未知/无值选项：不进扫描面
+        if key in ("url", "request-target"):
+            # 配置里的 URL 也要进 urls（实测绕过：白名单命中命令行
+            # 那条后，配置里的目标就不检查了）。
+            info["config_urls"].append(val)
+            info.setdefault("extra_urls", []).append(val)
+            continue
+        if key == "header":
+            # curl 的 -H 支持 @file（一行一个头）。只有以 @ 开头的
+            # 才是文件，别把 "X: @foo" 这种值当路径。
+            if val.startswith("@"):
+                content, _is_file = _read_maybe_file(val)
+                info["headers"].append(content)
             else:
-                info["body_parts"].append(val)
-                info["has_body"] = True
+                info["headers"].append(val)
+            continue
+        try:
+            _absorb_flag(info, flag, val)
+        except BodyTooLarge:
+            raise
+        except Exception:
+            continue
 
 
-def _take_config_stdin(value, limit=262144):
+def _take_config_stdin(value, limit=None, strict=True):
     """`-K -`：配置来自 stdin。读进来落临时文件，返回改写后的参数值。
 
     返回 None 表示不需要接管（不是 -K -）。
+
+    与 body 一样遵守"扫描字节 = 发送字节"：早先硬编码 262144，
+    配置超长就被**截断后**交给 curl（用户的选项被静默丢掉）。
+    现在用 _BODY_LIMIT，超限抛 BodyTooLarge。
     """
+    limit = _BODY_LIMIT if limit is None else limit
     if not isinstance(value, str) or value.strip() not in ("-", "<-"):
         return None
     try:
-        data = sys.stdin.buffer.read(limit)
+        data = sys.stdin.buffer.read(limit + 1)
     except (OSError, ValueError, AttributeError):
         return None
+    if len(data) > limit:
+        if strict:
+            raise BodyTooLarge("stdin 配置超过 %d 字节" % limit)
+        data = data[:limit]
     if not data:
         return None
     try:

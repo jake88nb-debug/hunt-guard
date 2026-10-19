@@ -300,17 +300,21 @@ class ProxyServer(object):
             raw_pairs.append((key, value))
 
         lower = {k.lower(): v for k, v in headers.items()}
+        # 代理的读入上限 = 引擎的扫描上限（不再是各自一套 32MB/256KB）：
+        # 否则 256KB~32MB 这段既不检查又照样转发，等于留了个盲区
+        # （实测：body = "a"*270000 + "&action=delete" 直接过去）。
+        limit = self._scan_limit()
         body = b""
         if lower.get("transfer-encoding", "").lower().startswith("chunked"):
-            body = reader.read_chunked()
+            body = reader.read_chunked(limit=limit)
         elif "content-length" in lower:
             try:
                 length = int(lower["content-length"])
             except ValueError:
                 length = 0
-            if length > MAX_BODY_BYTES:
+            if length > limit:
                 raise _BodyTooLarge(
-                    "Content-Length %d 超过 %d 字节" % (length, MAX_BODY_BYTES))
+                    "Content-Length %d 超过扫描上限 %d 字节" % (length, limit))
             body = reader.read_exact(max(length, 0))
 
         return method, target, version, raw_pairs, body
@@ -542,8 +546,23 @@ class ProxyServer(object):
                             tool="proxy-connect")
         try:
             return engine.scan(target)
-        except Exception:
-            return None
+        except Exception as exc:
+            # 与普通请求一致：引擎异常时按 fail_mode 处理。
+            # 早先这里 return None —— 调用方把 None 当成"允许"，于是
+            # HTTPS CONNECT 在引擎异常时直接放隧道（实测 fail-open）。
+            self._logger("CONNECT 扫描异常：%r" % exc)
+            fail_mode = "closed"
+            try:
+                fail_mode = str(engine.settings.get(
+                    "fail_mode", "closed")).lower()
+            except Exception:
+                pass
+            if fail_mode == "open":
+                return Verdict(blocked=False, reason="引擎异常，已放行",
+                               stage="engine_error")
+            return Verdict(blocked=True,
+                           reason="WAF 引擎异常，按 fail_mode=closed 处理",
+                           stage="engine_error", hits=[], mode="block")
 
     # ------------------------------------------------------------ 普通请求
 
@@ -619,6 +638,16 @@ class ProxyServer(object):
 
         return self._forward(client, method, scheme, host, port, path_query,
                              headers, body, version)
+
+    def _scan_limit(self):
+        """本次请求允许的最大 body（与引擎的 max_scan_bytes 一致）。"""
+        try:
+            value = int(get_engine().settings.get("max_scan_bytes") or 0)
+        except Exception:
+            value = 0
+        if value <= 0:
+            return MAX_BODY_BYTES
+        return min(value, MAX_BODY_BYTES)
 
     def _resolve_target(self, method, target, headers, host_hint, port_hint, tls):
         lower_headers = {k.lower(): v for k, v in headers}
