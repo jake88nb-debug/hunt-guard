@@ -129,6 +129,69 @@ DEFAULT_SETTINGS = {
     "unlock_reason": "",
 }
 
+# normalize 支持的 op 名（与 normalize._apply_ops_with_map 的分支一致）
+NORMALIZE_OPS = frozenset([
+    "url_decode", "html_unescape", "unicode_unescape", "fold_fullwidth",
+    "strip_invisible", "strip_sql_comment", "collapse_ws", "compact", "lower",
+])
+
+
+def _as_bool(value, default):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        low = value.strip().lower()
+        if low in ("1", "true", "yes", "on"):
+            return True
+        if low in ("0", "false", "no", "off", ""):
+            return False
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
+def _as_int(value, default, low, high):
+    if isinstance(value, bool):
+        return default
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, number))
+
+
+def _sanitize_settings(settings):
+    """把非法 settings 修回默认值（而不是让整份配置失效）。
+
+    一个笔误不该把工具变成"全拦"或"全放"：非法值回落默认，
+    合法值原样保留。校验只看**类型与范围**，不改变用户意图。
+    """
+    out = copy.deepcopy(settings if isinstance(settings, dict) else {})
+    for key in ("enabled", "case_sensitive", "scan_headers", "log_allowed"):
+        out[key] = _as_bool(out.get(key), DEFAULT_SETTINGS[key])
+    out["max_scan_bytes"] = _as_int(out.get("max_scan_bytes"),
+                                    DEFAULT_SETTINGS["max_scan_bytes"],
+                                    4096, 64 * 1024 * 1024)
+    out["unlock_until"] = _as_int(out.get("unlock_until"), 0, 0, 10 ** 12)
+    reason = out.get("unlock_reason", "")
+    out["unlock_reason"] = reason if isinstance(reason, str) else str(reason)
+
+    ops = out.get("normalize", DEFAULT_SETTINGS["normalize"])
+    if isinstance(ops, str):
+        ops = [part.strip() for part in ops.split(",") if part.strip()]
+    if not isinstance(ops, list):
+        ops = list(DEFAULT_SETTINGS["normalize"])
+    clean = []
+    for op in ops:
+        if not isinstance(op, str):
+            continue
+        name = op.strip().lower()
+        if name in NORMALIZE_OPS and name not in clean:
+            clean.append(name)
+    out["normalize"] = clean
+    return out
+
 
 # ---------------------------------------------------------------- 默认规则
 
@@ -1200,6 +1263,17 @@ def validate_document(doc):
         for key in DEFAULT_SETTINGS:
             if key in settings:
                 out["settings"][key] = settings[key]
+    # 逐项校验并**修正**非法值（而不是拒绝整份文档）。
+    #
+    # 为什么不能只校验两个键（实测漏洞）：`max_scan_bytes` 写成
+    # `"abc"` 能通过校验，运行时在 engine._scan_inner 里
+    # `int("abc")` 抛异常 → 外层按 fail_mode=closed 处理 →
+    # **所有请求全被拦**。一个笔误把工具变成拒绝服务。
+    # 同理 normalize 不是数组、enabled 是 "false" 字符串都会在别的
+    # 地方以奇怪的方式失效。
+    #
+    # 策略：非法值回落到默认值，工具继续可用；合法值原样保留。
+    out["settings"] = _sanitize_settings(out["settings"])
     mode = str(out["settings"].get("mode", "block")).lower()
     if mode not in ("block", "monitor"):
         return False, "settings.mode 只能是 block 或 monitor"

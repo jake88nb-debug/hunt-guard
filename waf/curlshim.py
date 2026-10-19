@@ -71,6 +71,29 @@ SHORT_WITH_INLINE = {"-X", "-H", "-d", "-F", "-T", "-A", "-e", "-b", "-c",
                      "-u", "-x", "-o", "-w", "-K", "-E", "-m", "-U", "-Q"}
 
 
+# 要扫描的内容超过上限 → 明确拒绝（不是截断后照发）。
+#
+# 为什么这是"拒绝"而不是"警告"：截断意味着**扫描的字节 ≠ 发出的字节**，
+# 把 payload 放在上限之后就能绕过去。宁可让用户看见一条明确的拒绝，
+# 也不能给一条静默的绕过路径。
+class BodyTooLarge(Exception):
+    pass
+
+
+_BODY_LIMIT = 262144            # 与 settings.max_scan_bytes 的默认值一致
+
+
+def set_body_limit(limit):
+    """按生效中的 settings.max_scan_bytes 调整上限（由 _main_inner 调用）。"""
+    global _BODY_LIMIT
+    try:
+        value = int(limit)
+    except (TypeError, ValueError):
+        return
+    if value >= 4096:
+        _BODY_LIMIT = value
+
+
 def _is_url(token):
     low = token.lower()
     if low.startswith(("http://", "https://", "ftp://", "ftps://",
@@ -122,6 +145,10 @@ def parse_curl_args(argv):
     positional = []
     idx = 0
     total = len(argv)
+    # curl 的 -q/--disable（**必须是第一个参数**）表示"别读默认配置文件"。
+    # 我们跟着它走，否则会去扫一份 curl 根本不会读的文件。
+    if argv and argv[0] in ("-q", "--disable"):
+        info["no_default_config"] = True
     while idx < total:
         token = argv[idx]
         if token == "--":
@@ -204,21 +231,34 @@ def parse_curl_args(argv):
     if not info["url"] and positional:
         info["url"] = positional[0]
 
-    # 收集全部 URL（含 --next 之后的、以及多个位置参数）。
+    # 收集全部 URL（含 --next 之后的、以及多个 --url / 位置参数）。
     #
     # 为什么必须全部收（实测发现的绕过）：
     #     curl <白名单URL> --next http://victim/delete
-    # 请求级白名单命中**第一个** URL 后整个请求免检，第二个 URL 上的
-    # delete 就看不见了。多 URL 是 curl 的正常能力（--next 分隔多组
-    # 参数），不是刻意构造。这里把每个 URL 都记下来，交给引擎逐个判定。
+    #     curl --url http://victim/delete --next --url http://127.0.0.1/x
+    # 请求级白名单命中**任意一个** URL 后若整个请求免检，另一个 URL 上的
+    # delete 就看不见了。多 URL 是 curl 的正常能力（--next / 多个 --url），
+    # 不是刻意构造。早先 --url 的值只保留**最后一个**（info["url"] 被
+    # 反复覆盖），第二个例子实测整条命令只剩 127.0.0.1 —— 现在每个
+    # --url 都追加进 extra_urls，和位置参数一起收全。
     if not info.get("urls"):
         seen = []
         for token in positional:
             if _is_url(token) and token not in seen:
                 seen.append(token)
+        for token in (info.get("extra_urls") or []):
+            if token and _is_url(token) and token not in seen:
+                seen.append(token)
         if info["url"] and info["url"] not in seen:
             seen.insert(0, info["url"])
         info["urls"] = seen
+
+    # curl 会自动读默认配置文件（没有 -q 时）—— 那里藏的 URL/参数
+    # 同样要进扫描面（实测绕过，见 _default_config_paths）。
+    if not info.get("no_default_config"):
+        for cfg_path in _default_config_paths():
+            if os.path.isfile(cfg_path):
+                _absorb_config_file(info, cfg_path)
 
     if info["has_body"] and info["method"] == "GET":
         info["method"] = "POST"          # curl 的隐式行为
@@ -267,6 +307,8 @@ def _absorb_flag(info, flag, value):
         info["method"] = (value or "GET").upper()
     elif flag in _VALUE_FLAGS_URL:
         info["url"] = value
+        # 只留最后一个会让 `--url A --next --url B` 丢掉 A（实测绕过）。
+        info.setdefault("extra_urls", []).append(value)
     elif flag in _VALUE_FLAGS_HEADER:
         info["headers"].append(value)
         lowered = (value or "").lower()
@@ -276,7 +318,9 @@ def _absorb_flag(info, flag, value):
         # -d @body.json 必须真的去读文件。早先只把 "@body.json" 这个
         # 字符串当 body 扫 —— 长 body 写文件是打接口的常规写法（不是
         # 刻意绕过），于是最正常的用法反而绕过了检查。
-        content, is_file = _read_maybe_file(value)
+        # strict：body 是文本、且**原文件会被完整发送**。超过扫描上限
+        # 就必须拒绝，否则 payload 放在上限之后即可绕过（实测）。
+        content, is_file = _read_maybe_file(value, strict=True)
         info["body_parts"].append(content)
         info["has_body"] = True
         if is_file:
@@ -369,7 +413,7 @@ def _absorb_flag(info, flag, value):
         _absorb_config_file(info, value)
 
 
-def _take_stdin_value(value, limit=262144):
+def _take_stdin_value(value, limit=None, strict=True):
     """碰到 `@-` / `<-`（body 来自 stdin）时接管 stdin。
 
     返回改写后的参数值（`@<临时文件>`），不需要接管时返回 None。
@@ -378,7 +422,13 @@ def _take_stdin_value(value, limit=262144):
     而 body 走 stdin —— 我们不读的话 curl 读走，我们就永远看不到内容，
     等于给了一条"把 payload 塞进管道就绕过"的路子（实测发现）。
     读进来落成临时文件后把参数改写回去，curl 的行为不变。
+
+    为什么超限要**拒绝**而不是截断（实测 bug）：早先读 ``limit`` 字节
+    就停，再把截断后的内容写成临时文件交给 curl —— 用户上传的东西被
+    **静默截短**（数据丢失），而超限那部分本来也没扫过。现在坚持
+    "扫描过的字节 = 实际发出去的字节"：超限直接拒绝并说明怎么放行。
     """
+    limit = _BODY_LIMIT if limit is None else limit
     if not isinstance(value, str) or not value:
         return None
     raw = value.strip()
@@ -400,9 +450,13 @@ def _take_stdin_value(value, limit=262144):
         return None
 
     try:
-        data = sys.stdin.buffer.read(limit)
+        data = sys.stdin.buffer.read(limit + 1)
     except (OSError, ValueError, AttributeError):
         return None
+    if len(data) > limit:
+        if strict:
+            raise BodyTooLarge("stdin body 超过 %d 字节" % limit)
+        data = data[:limit]
     if not data:
         return None
     try:
@@ -463,7 +517,7 @@ def _cleanup_stale_stdin_temps(max_age=3600):
     return removed
 
 
-def _read_maybe_file(value, limit=262144):
+def _read_maybe_file(value, limit=None, strict=False):
     """把 curl 的 @file / <file 语法解析出来并读内容。
 
     curl 的约定（**每种都要支持，漏一种就是一条绕过路径**）：
@@ -482,7 +536,13 @@ def _read_maybe_file(value, limit=262144):
     body 里只剩字面量 'q@payload.txt'，文件里的 action=delete 看不见。
 
     读不到就退回原字面量 —— 绝不能因为读文件失败而漏掉检查。
+
+    ``strict=True``（用于 text body / config）：文件超过上限就抛
+    BodyTooLarge，保证"扫描字节 = 发送字节"。``-F`` / ``-T`` 的文件
+    上传内容不设 strict：那是二进制载荷，扫开头是尽力而为，拒绝超大
+    上传反而会挡住正常的上传测试（这条已经是写入文档的已知边界）。
     """
+    limit = _BODY_LIMIT if limit is None else limit
     if not isinstance(value, str) or not value:
         return value, False
     raw = value.strip()
@@ -524,13 +584,17 @@ def _read_maybe_file(value, limit=262144):
         if not os.path.isfile(path):
             return value, False
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            content = fh.read(limit)
+            content = fh.read(limit + 1)
+        if len(content) > limit:
+            if strict:
+                raise BodyTooLarge("%s 超过 %d 字节" % (path, limit))
+            content = content[:limit]
         return content, True
     except (OSError, ValueError):
         return value, False
 
 
-def _absorb_config_file(info, path):
+def _absorb_config_file(info, path, limit=None, strict=True):
     """把 curl 配置文件的内容也纳入扫描面。
 
     格式是每行 `option = value`（或 `option value`），注释以 # 开头。
@@ -543,6 +607,7 @@ def _absorb_config_file(info, path):
     等于给了一条绕过。读进来落临时文件后把参数改写成 `-K <file>`，
     curl 的行为不变（见 _take_config_stdin）。
     """
+    limit = _BODY_LIMIT if limit is None else limit
     if not isinstance(path, str):
         return
     p = path.strip().strip('"').strip("'")
@@ -552,10 +617,57 @@ def _absorb_config_file(info, path):
         if not os.path.isfile(p):
             return
         with open(p, "r", encoding="utf-8", errors="replace") as fh:
-            text = fh.read(262144)
+            text = fh.read(limit + 1)
     except (OSError, ValueError):
         return
+    if len(text) > limit:
+        if strict:
+            raise BodyTooLarge("配置文件 %s 超过 %d 字节" % (p, limit))
+        text = text[:limit]
     _absorb_config_text(info, text)
+
+
+def _default_config_paths():
+    """curl 会**自动读取**的默认配置文件位置。
+
+    为什么必须读（实测绕过）：curl 启动时若没有 `-q`，会自己读一份
+    默认配置；我们只在显式 `-K` 时读。于是
+
+        echo 'url = http://victim/delete' >> ~/.curlrc
+        curl http://127.0.0.1/x            # 看起来人畜无害
+
+    真实请求打向 victim/delete，而检测面里一个字都没有。
+
+    路径按 curl 自己的查找顺序列（多读无害，重复内容会被引擎去重）：
+      1. $CURL_HOME/curlrc 或 $CURL_HOME/.curlrc
+      2. $XDG_CONFIG_HOME/curlrc
+      3. $HOME/.curlrc（Unix / Git Bash）
+      4. %APPDATA%\\_curlrc、%USERPROFILE%\\_curlrc（Windows）
+    """
+    paths = []
+
+    def add(item):
+        if item and os.path.normcase(item) not in [os.path.normcase(p)
+                                                   for p in paths]:
+            paths.append(item)
+
+    curl_home = os.environ.get("CURL_HOME")
+    if curl_home:
+        add(os.path.join(curl_home, "curlrc"))
+        add(os.path.join(curl_home, ".curlrc"))
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        add(os.path.join(xdg, "curlrc"))
+    home = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+    if home:
+        add(os.path.join(home, ".curlrc"))
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        add(os.path.join(appdata, "_curlrc"))
+    userprofile = os.environ.get("USERPROFILE")
+    if userprofile:
+        add(os.path.join(userprofile, "_curlrc"))
+    return paths
 
 
 def _absorb_config_text(info, text):
@@ -893,8 +1005,22 @@ def _main_inner(argv):
         real = find_real_curl()
         return forward(real, argv) if real else 127
 
+    # 扫描上限与引擎保持一致：扫描过的字节必须等于实际发出去的字节。
+    try:
+        set_body_limit(engine.settings.get("max_scan_bytes"))
+    except Exception:
+        pass
+
     try:
         target, _info = parse_curl_args(argv)
+    except BodyTooLarge as exc:
+        # 明确拒绝，**不**转发。截断后转发 = 给一条静默绕过。
+        sys.stderr.write("[agent-waf] 拒绝执行：%s\n" % exc)
+        sys.stderr.write("[agent-waf] 原因：超过扫描上限的内容不会被检查，"
+                         "截断后照发等于留下绕过口子。\n")
+        sys.stderr.write("[agent-waf] 要发大 body：调大 settings.max_scan_bytes，"
+                         "或 wafctl unlock / set WAF_DISABLE=1。\n")
+        return BLOCK_EXIT_CODE
     except Exception as exc:
         sys.stderr.write("[agent-waf] 参数解析失败，放行给真实 curl：%s\n" % exc)
         real = find_real_curl()

@@ -343,11 +343,15 @@ HTTP 请求行"的字节块。手写报文正常写法是一次 `sendall` 发完
 `http.client` 自己会分层发，但那条路径由 `http.client` 补丁覆盖。
 
 **大请求体的边界**：单个字段只扫前 **256KB**（`settings.max_scan_bytes`）。
-超出的部分**不检查** —— 把敏感词放在 256KB 之后就能过去。
-这是刻意的性能取舍（不截断的话一个几 MB 的上传会把每个请求的判定
-拖到秒级），但盲区是真实存在的，所以写在这里。
+超过上限时**直接拒绝**（1.1.9 起），而不是截断后照发 —— 截断意味着
+"扫描的字节 ≠ 发出的字节"，把敏感词放在上限之后就能绕过。
 
-要收紧的话改 `data/config.json`：`{"max_scan_bytes": 1048576}`
+- `curl -d @file` / `-K` / stdin body：超过上限 → 拒绝并说明原因
+- 代理：Content-Length 或 chunked 超过 32MB → 回 413
+- `-F` / `-T` 的**文件上传内容**仍是"只扫开头"：那是二进制载荷，
+  拒绝超大上传会挡住正常的上传测试（明确写在这里，不装作扫全了）
+
+要放宽改 `data/config.json`：`{"max_scan_bytes": 1048576}`
 （1MB；注意判定耗时随之上升）。正常挖洞的请求体远小于 256KB。
 
 **代理 + HTTPS 的边界（重要）**：非 MITM 模式下，代理只能看到
@@ -624,7 +628,7 @@ wafctl install-path --machine          # 机器级（需管理员，全局生效
 wafctl uninstall-path                  # 卸载：移除接入 + 复核最终状态
 wafctl uninstall-path --purge-data     # 顺带删 data（记录/规则/证书，不可逆）
 
-wafctl test                            # 跑自测（279+ 项）
+wafctl test                            # 跑自测（304 项）
 ```
 
 ---
@@ -717,7 +721,7 @@ hunt-guard\                ← 你解压/克隆出来的目录，名字随意
 ├── docs\DESIGN.md         框架设计说明
 ├── CHANGELOG.md           更新记录
 ├── .github\workflows\     CI（三平台 × 两 Python 版本）
-└── tests\                 自测（279 项）
+└── tests\                 自测（304 项）
 ```
 
 ---
@@ -920,5 +924,5 @@ python3 waf/cli.py stop
 
 ## 更新记录
 
-见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **1.1.8**
+见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **1.1.9**
 （拦截面与安全修复较多，建议升级后跑一次 `wafctl install-path --force`）。

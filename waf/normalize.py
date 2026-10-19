@@ -146,8 +146,9 @@ def fold_fullwidth(text):
 
 
 def strip_sql_noise(text):
-    text = SQL_COMMENT_RE.sub("", text)
-    return text
+    # 替换成空格而不是直接删除：`drop/**/table` 删掉注释会变成
+    # `droptable`，反而匹配不到 `drop table`（注释在 SQL 里等价于空白）。
+    return SQL_COMMENT_RE.sub(" ", text)
 
 
 def collapse_ws(text):
@@ -387,18 +388,42 @@ def _fold_with_map(chars, idx):
 
 
 def _strip_with_map(chars, idx, pattern=None):
-    out_chars, out_idx = [], []
-    for ch, origin in zip(chars, idx):
-        if pattern is not None:
-            if pattern.search(ch):
-                continue
-        else:
+    """删不可见字符；给了 pattern 时把**正则匹配到的片段替换成空格**。
+
+    为什么带映射的这条路径要单独实现（实测 bug）：早先它对**单个字符**
+    跑 ``pattern.search(ch)``，而 ``/*...*/`` 是多字符，永远匹配不上 ——
+    于是开启了 ``strip_sql_comment`` 的规则在带映射的变体里等于没开，
+    实测 ``drop/**/table`` 的映射变体仍然是原文。
+
+    为什么替换成空格而不是直接删：``drop/**/table`` 删掉注释会变成
+    ``droptable``，反而匹配不到 ``drop table``；SQL 里注释本来就等价于
+    空白，替换成一个空格才是正确语义（偏移归到注释首字符，
+    白名单 / exclude 的坐标判断仍然成立）。
+    """
+    if pattern is None:
+        out_chars, out_idx = [], []
+        for ch, origin in zip(chars, idx):
             if INVISIBLE_RE.search(ch):
                 continue
             if ch not in "\t\n\r" and unicodedata.category(ch)[0] == "C":
                 continue
-        out_chars.append(ch)
-        out_idx.append(origin)
+            out_chars.append(ch)
+            out_idx.append(origin)
+        return out_chars, out_idx
+
+    text = "".join(chars)
+    out_chars, out_idx = [], []
+    last = 0
+    for match in pattern.finditer(text):
+        if match.end() <= match.start():
+            continue
+        out_chars.extend(chars[last:match.start()])
+        out_idx.extend(idx[last:match.start()])
+        out_chars.append(" ")
+        out_idx.append(idx[match.start()])
+        last = match.end()
+    out_chars.extend(chars[last:])
+    out_idx.extend(idx[last:])
     return out_chars, out_idx
 
 

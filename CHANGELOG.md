@@ -5,6 +5,89 @@
 
 ---
 
+## 1.1.9 — 2026-10-16
+
+外部审计里 9 条 P0，**逐条复现后全部确认为真**（3 条从代码即可确认，
+6 条写了复现脚本），已修 + 回归测试。共同点：都属于"配置/解析说了
+一套，实际做的是另一套"。
+
+### 1. `source=host` 白名单实际失效
+
+`_request_level_allow` 不管 source 是 url 还是 host，都拿完整 URL 去
+匹配。`{"source":"host","pattern":"^lab\\.local$"}` 配
+`http://lab.local/delete` 永远不命中 —— 用户以为放行了本机靶场，
+实际照样被拦。现在 host 条目按主机名（含去端口形式）匹配，
+url 条目按完整 URL 匹配。
+
+### 2. 多个 `--url` 只保留最后一个
+
+`curl --url A --next --url B` 里 A 被直接丢掉。配合白名单就是：
+`--url http://127.0.0.1/x --next --url http://victim/delete`
+→ 白名单命中第一条 → 整个请求免检 → victim 上的 delete 不检查。
+现在每个 `--url` 都追加进 `extra_urls`，和位置参数一起收全。
+
+### 3. curl 默认配置文件完全没扫
+
+curl 自动读 `~/.curlrc` / `%APPDATA%\_curlrc` / `$CURL_HOME/curlrc` /
+`$XDG_CONFIG_HOME/curlrc`，我们只在显式 `-K` 时读。于是把
+`url = http://victim/delete` 写进默认配置，再跑一条看起来人畜无害的
+curl 就能绕过。现在按 curl 的顺序读这些文件并纳入扫描面；
+`-q`/`--disable` 作为首参时跳过（curl 此时也不读）。
+
+### 4. 扫描字节 ≠ 发送字节
+
+- `-d @file` 只扫前 256KB，但原文件**完整发送** → payload 放后面即绕过
+- `-d @-` 只读 256KB，然后把截断内容写临时文件交给 curl →
+  用户上传的内容被**静默截短**
+- 代理 chunked / Content-Length 超 32MB 时 break，按截断长度重写
+  Content-Length → 大请求被改坏、解析错位
+
+现在原则统一：**扫描过的字节 = 实际发出去的字节**。超限直接拒绝
+（curl 通道退出 126 并说明怎么放行；代理回 413），不再截断后照发。
+`-F`/`-T` 的文件上传内容仍是"只扫开头"（二进制载荷），已在 USAGE 写明。
+
+### 5. 代理在引擎异常时 fail-open
+
+`proxy.py` 里 `except Exception` 直接构造 `blocked=False` 的 verdict ——
+引擎一出问题，代理就成为纯透传，和 `fail_mode=closed` 的承诺相反。
+现在与 guard / curlshim 一致：按 `fail_mode` 决定，默认拒绝。
+
+### 6. 命令门槛词表缓存永不失效
+
+`_GATE_WORDS_CACHE` 算一次用一辈子，而且派生自**内置默认规则**。
+用户在 `data/rules.json` 里新增一个破坏性关键词后，已在跑的进程
+（长驻 AI 会话、服务进程）永远看不见它，直到重启。
+现在按 (路径, mtime, size) 失效，且派生自**生效中的**规则文件。
+
+### 7. settings 校验缺口
+
+只校验了 mode / fail_mode。`max_scan_bytes: "abc"` 能通过校验，
+运行时 `int("abc")` 抛异常 → 外层按 fail_mode=closed 处理 →
+**所有请求全被拦**。一个笔误把工具变成拒绝服务。
+现在逐项校验类型与范围，非法值回落默认值（合法值原样保留），
+normalize 过滤未知 op，字符串 "false"/"0" 正确转 bool。
+
+### 8. `strip_sql_comment` 在带映射变体里是空操作
+
+`_strip_with_map` 对**单个字符**跑 `SQL_COMMENT_RE`，而 `/*...*/`
+是多字符，永远匹配不上 —— 开了这个归一化选项的规则等于没开。
+现在按片段匹配，并把注释替换成**空格**（直接删会得到 `droptable`，
+反而匹配不到 `drop table`）。偏移仍映射回原文。
+
+### 9. 自身接口豁免允许空 path
+
+`if path and not (...)` —— path 为空时直接通过路径判据，只要目标在
+回环 + 控制台端口，空 path 请求就被当成自身接口跳过检查。
+现在要求 path 非空且明确是 `/api/` 路由。
+
+### 回归测试
+
+新增 `tests/test_audit_p0.py` **27 项**：每条 P0 一个可复现的用例
+（含代理 413 / fail-closed 的 socket 级测试、host 白名单正反例、
+`.curlrc` 端到端拦截、超限拒绝、以及"非法配置不会导致全拦"）。
+自测 279 → **304** 项。
+---
+
 ## 1.1.8 — 2026-10-16
 
 ### 一键卸载（双击 `uninstall.bat`）

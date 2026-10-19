@@ -416,11 +416,19 @@ class Handler(BaseHTTPRequestHandler):
                 tool="console",
             )
         elif mode == "curl":
-            from .curlshim import parse_curl_args
+            from .curlshim import BodyTooLarge, parse_curl_args, set_body_limit
             argv = payload.get("argv")
             if isinstance(argv, str):
                 argv = argv.split()
-            target, _ = parse_curl_args(list(argv or []))
+            try:
+                set_body_limit(engine.settings.get("max_scan_bytes"))
+                target, _ = parse_curl_args(list(argv or []))
+            except BodyTooLarge as exc:
+                # 扫描字节 = 发送字节：超限拒绝，不截断后放行
+                self._send_json({"success": False, "blocked": True,
+                                 "reason": "请求体超过扫描上限：%s" % exc,
+                                 "stage": "oversize", "hits": []}, 413)
+                return
             target.tool = "console"
         else:
             text = str(payload.get("text") or "")

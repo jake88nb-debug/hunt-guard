@@ -390,9 +390,14 @@ class RuleEngine(object):
         if not api_ports:
             return False
 
-        # 路径必须是控制台自己的接口
+        # 路径必须是控制台自己的接口。
+        #
+        # 早先写的是 `if path and not (...)`：**path 为空时直接通过**，
+        # 于是只要目标落在回环 + 控制台端口，一个 path 为空的请求就被
+        # 当成"自身接口"跳过检查（实测：_is_self_endpoint 返回 True）。
+        # 现在要求 path 非空且明确是 /api/ 路由。
         path = (target.path or "").strip()
-        if path and not (path.startswith("/api/") or path == "/"):
+        if not path or not path.startswith("/api/"):
             return False
 
         loopback = {"127.0.0.1", "localhost", "::1"}
@@ -626,27 +631,60 @@ class RuleEngine(object):
         return False
 
     def _request_level_allow(self, target):
-        """source=url 或 host 的放行条目：命中则跳过检查。
+        """source=url / host 的放行条目：命中则跳过检查。
 
         只对真正的 URL/主机名生效，避免 body 里的字段名意外放开整个请求。
+
+        两种 source 必须**分开匹配**（实测 bug）：早先不管 source 是
+        哪个，都拿 ``[target.url]``（没有 URL 时才退回 host）去匹配，
+        于是 ``{"source":"host","pattern":"^lab\\.local$"}`` 配上
+        ``http://lab.local/delete`` 永远不命中 —— 白名单形同虚设，
+        用户以为放行了本机靶场，实际照样被拦。现在 host 条目拿主机名
+        （含去端口形式）匹配，url 条目拿完整 URL 匹配。
 
         注意：调用方（_scan_inner）还要确认**所有** URL 都在白名单里
         才会真的跳过 —— 单看第一条会让 `curl <白名单> --next <攻击URL>`
         绕过（见 _scan_inner 里的说明）。
         """
-        candidates = []
-        if target.url:
-            candidates.append(target.url)
-        elif target.host:
-            candidates.append(target.host)
-        if not candidates:
+        if not self._allowlist:
             return None
+        urls = []
+        if target.url:
+            urls.append(target.url)
+        hosts = []
+        if target.host:
+            hosts.append(target.host)
+        try:
+            from urllib.parse import urlsplit
+            netloc = urlsplit(target.url or "").netloc
+            if netloc and netloc not in hosts:
+                hosts.append(netloc)
+        except Exception:
+            pass
+        # 带端口的 netloc 再按"去端口"比一次：`^lab\.local$` 这种锚定
+        # 写法不该被 `:8080` 弄失效（与 _host_allowed_any 一致）。
+        bare_hosts = []
+        for item in hosts:
+            name = item.split(":")[0].strip().lower()
+            if name and name not in bare_hosts:
+                bare_hosts.append(name)
+
         for entry, regex in self._allowlist:
-            if str(entry.get("source") or "any") not in ("url", "host"):
-                continue
-            for text in candidates:
-                if regex.search(text):
-                    return entry
+            source = str(entry.get("source") or "any")
+            if source == "host":
+                for text in hosts + bare_hosts:
+                    try:
+                        if regex.search(text):
+                            return entry
+                    except Exception:
+                        continue
+            elif source == "url":
+                for text in urls:
+                    try:
+                        if regex.search(text):
+                            return entry
+                    except Exception:
+                        continue
         return None
 
     def _allow_spans(self, source, text):

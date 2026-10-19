@@ -923,9 +923,15 @@ def cmd_check(args):
     engine = get_engine()
     lowered = raw.lower()
     if lowered.startswith("curl"):
-        from waf.curlshim import parse_curl_args
+        from waf.curlshim import BodyTooLarge, parse_curl_args, set_body_limit
         argv = _split_args(raw[len("curl"):].strip())
-        target, _ = parse_curl_args(argv)
+        try:
+            set_body_limit(engine.settings.get("max_scan_bytes"))
+            target, _ = parse_curl_args(argv)
+        except BodyTooLarge as exc:
+            out("拒绝：%s（扫描字节必须等于发送字节，截断后放行等于留绕过口）"
+                % exc)
+            return 2
         target.tool = "check"
     elif lowered.startswith(("http://", "https://")):
         from urllib.parse import urlsplit
@@ -936,8 +942,13 @@ def cmd_check(args):
     elif len(tokens) > 1 and tokens[0] in ("-X", "--request", "-H", "--header",
                                            "-d", "--data", "--url"):
         # 用户省略了开头的 curl 字样：仍按 curl 参数解析
-        from waf.curlshim import parse_curl_args
-        target, _ = parse_curl_args(tokens)
+        from waf.curlshim import BodyTooLarge, parse_curl_args, set_body_limit
+        try:
+            set_body_limit(engine.settings.get("max_scan_bytes"))
+            target, _ = parse_curl_args(tokens)
+        except BodyTooLarge as exc:
+            out("拒绝：%s（截断后放行等于留绕过口）" % exc)
+            return 2
         target.tool = "check"
     else:
         target = ScanTarget(kind="text", method="", body=raw, tool="check")

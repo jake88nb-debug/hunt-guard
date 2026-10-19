@@ -34,6 +34,16 @@ from .models import ScanTarget, Verdict
 
 MAX_HEADER_BYTES = 256 * 1024
 MAX_BODY_BYTES = 32 * 1024 * 1024
+
+
+class _BodyTooLarge(Exception):
+    """请求体超过扫描上限。
+
+    为什么是异常而不是截断：截断后照发 = 扫描的字节 ≠ 发出的字节，
+    payload 放在上限之后就能绕过；而且 Content-Length 按截断长度重写
+    会把用户的请求**改坏**（实测：大请求被截短、解析错位）。
+    超限就明确回 413，让用户知道该调大上限或走 unlock。
+    """
 SOCKET_TIMEOUT = 60
 BLOCK_STATUS = "403 Forbidden"
 
@@ -100,7 +110,8 @@ class _Reader(object):
             body += self.read_exact(size)
             self.read_exact(2)                     # CRLF
             if len(body) > limit:
-                break
+                raise _BodyTooLarge(
+                    "chunked body 超过 %d 字节" % limit)
         return body
 
     def read_remaining(self, limit=MAX_BODY_BYTES):
@@ -228,6 +239,15 @@ class ProxyServer(object):
         while True:
             try:
                 request = self._read_request(reader, host_hint, port_hint, tls)
+            except _BodyTooLarge as exc:
+                self._logger("请求体超限：%s" % exc)
+                self._send_error(
+                    client, 413, "Payload Too Large",
+                    "请求体超过代理的扫描上限（%d 字节）：%s。"
+                    "截断后照发会留下绕过口子，所以这里直接拒绝。"
+                    "要发大 body：调大 settings.max_scan_bytes，"
+                    "或 wafctl unlock。" % (MAX_BODY_BYTES, exc))
+                return
             except (ValueError, socket.timeout):
                 return
             if request is None:
@@ -288,7 +308,10 @@ class ProxyServer(object):
                 length = int(lower["content-length"])
             except ValueError:
                 length = 0
-            body = reader.read_exact(min(max(length, 0), MAX_BODY_BYTES))
+            if length > MAX_BODY_BYTES:
+                raise _BodyTooLarge(
+                    "Content-Length %d 超过 %d 字节" % (length, MAX_BODY_BYTES))
+            body = reader.read_exact(max(length, 0))
 
         return method, target, version, raw_pairs, body
 
@@ -570,8 +593,23 @@ class ProxyServer(object):
         try:
             verdict = get_engine().scan(scan_target)
         except Exception as exc:
+            # 与 guard / curlshim 保持一致：按 fail_mode 决定。
+            # 早先这里**无条件放行** —— 引擎一出问题，代理就成了纯透传，
+            # 和 fail_mode=closed 的承诺相反（实测发现）。
             self._logger("扫描异常：%r" % exc)
-            verdict = Verdict(blocked=False, reason="引擎异常", stage="engine_error")
+            fail_mode = "closed"
+            try:
+                fail_mode = str(get_engine().settings.get(
+                    "fail_mode", "closed")).lower()
+            except Exception:
+                pass
+            if fail_mode == "open":
+                verdict = Verdict(blocked=False, reason="引擎异常，已放行",
+                                  stage="engine_error")
+            else:
+                verdict = Verdict(blocked=True,
+                                  reason="WAF 引擎异常，按 fail_mode=closed 处理",
+                                  stage="engine_error", hits=[], mode="block")
 
         if verdict.blocked:
             with self._lock:

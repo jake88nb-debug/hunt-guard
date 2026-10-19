@@ -1079,7 +1079,10 @@ def _gate_words():
     """
     try:
         from waf import rules as _rules
-        doc = _rules.default_document()
+        # 用**生效中的**规则（含用户在 data/rules.json 里加的规则），
+        # 而不是只有内置默认 —— 否则用户新增一个破坏性关键词，命令
+        # 通道永远看不见它（门槛把它当"无关命令"跳过）。
+        doc = _rules.load_document()
     except Exception:
         return set(_BASE_GATE_WORDS)     # 取不到规则也不能放宽
 
@@ -1147,12 +1150,31 @@ def _regex_literals(pattern):
 
 
 _GATE_WORDS_CACHE = None
+_GATE_WORDS_KEY = None
 
 
 def _gate_words_cached():
-    global _GATE_WORDS_CACHE
-    if _GATE_WORDS_CACHE is None:
+    """门槛词表缓存，**随规则文件失效**。
+
+    早先是"算一次用一辈子"：控制台里新增一个破坏性关键词后，已经在跑
+    的 Python 进程（长驻的 AI 会话、服务进程）仍用旧词表，新规则对
+    命令通道不生效，直到重启进程。长驻进程恰恰是最需要护栏的一类。
+
+    失效判据用 (路径, mtime, size)：改文件必定同时改 mtime，
+    代价只有一次 stat（微秒级），不需要每次重读 JSON。
+    """
+    global _GATE_WORDS_CACHE, _GATE_WORDS_KEY
+    key = None
+    try:
+        from waf import config as _config
+        path = _config.rules_path()
+        stat = os.stat(path)
+        key = (os.path.abspath(path), stat.st_mtime, stat.st_size)
+    except Exception:
+        key = None
+    if _GATE_WORDS_CACHE is None or key != _GATE_WORDS_KEY:
         _GATE_WORDS_CACHE = _gate_words()
+        _GATE_WORDS_KEY = key
     return _GATE_WORDS_CACHE
 
 
