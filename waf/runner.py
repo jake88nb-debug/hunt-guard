@@ -125,7 +125,6 @@ def main(argv=None):
         sys.stderr.write("[agent-waf]   PYTHONPATH= %s\n" % env.get("PYTHONPATH", ""))
 
     executable = argv[0]
-    resolved = shutil.which(executable, path=env.get("PATH")) or executable
     try:
         proc = subprocess.Popen(argv, env=env, executable=None)
     except FileNotFoundError:

@@ -1006,5 +1006,183 @@ class TestRound3PerfSanity(unittest.TestCase):
         self.assertEqual(variants[0][1], "plain text")
 
 
+class TestRound4ProxyGzip(EngineCase):
+    """第四轮 #1/#2：解压体超限拒绝；转发仍用原始压缩字节。"""
+
+    def _start_proxy(self):
+        from waf.proxy import ProxyServer
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        server = ProxyServer(host="127.0.0.1", port=port, mitm=False)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.daemon = True
+        thread.start()
+        time.sleep(0.4)
+        return server, port
+
+    def _upstream(self):
+        srv = socket.socket()
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(4)
+        port = srv.getsockname()[1]
+        records = []
+
+        def serve():
+            while True:
+                try:
+                    conn, _ = srv.accept()
+                except OSError:
+                    return
+                try:
+                    conn.settimeout(2.0)
+                    buf = b""
+                    while b"\r\n\r\n" not in buf:
+                        chunk = conn.recv(65536)
+                        if not chunk:
+                            break
+                        buf += chunk
+                    head, _, rest = buf.partition(b"\r\n\r\n")
+                    need = 0
+                    for line in head.split(b"\r\n"):
+                        if line.lower().startswith(b"content-length:"):
+                            try:
+                                need = int(line.split(b":", 1)[1].strip())
+                            except ValueError:
+                                need = 0
+                    while len(rest) < need:
+                        chunk = conn.recv(65536)
+                        if not chunk:
+                            break
+                        rest += chunk
+                    records.append((head, rest))
+                    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+                                 b"Connection: close\r\n\r\nok")
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+        threading.Thread(target=serve, daemon=True).start()
+        return srv, port, records
+
+    def _send(self, port, payload, timeout=6):
+        sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+        try:
+            sock.sendall(payload)
+            sock.settimeout(timeout)
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+            return data
+        finally:
+            sock.close()
+
+    def test_forwards_original_compressed_bytes(self):
+        """解压只用于扫描；转发的仍是原始 gzip 字节，头不能被剥。"""
+        import gzip
+        upstream, up_port, records = self._upstream()
+        payload = b'{"q":"hello"}'
+        gz = gzip.compress(payload)
+        server, port = self._start_proxy()
+        try:
+            resp = self._send(
+                port,
+                b"POST http://127.0.0.1:%d/api HTTP/1.1\r\n"
+                b"Host: 127.0.0.1:%d\r\nContent-Encoding: gzip\r\n"
+                b"Content-Length: %d\r\n\r\n" % (up_port, up_port, len(gz))
+                + gz)
+            self.assertIn(b"200", resp.split(b"\r\n", 1)[0], resp[:200])
+            self.assertTrue(records, "上游没收到请求")
+            head, body = records[0]
+            self.assertIn(b"content-encoding: gzip", head.lower(),
+                          "转发的头被改了")
+            self.assertEqual(body, gz,
+                             "转发的不再是原始压缩字节（上游会解压失败）")
+        finally:
+            server.shutdown()
+            upstream.close()
+
+    def test_rejects_decompressed_oversize(self):
+        """解压后超过扫描上限 → 413（不能只扫前一段却转发全部）。"""
+        import gzip
+        self.make_engine(settings={"max_scan_bytes": 4096})
+        gz = gzip.compress(b"a" * 8192 + b"&action=delete")
+        self.assertLess(len(gz), 4096, "构造的压缩体本身就超限了，用例无效")
+        server, port = self._start_proxy()
+        try:
+            resp = self._send(
+                port,
+                b"POST http://127.0.0.1/api HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\nContent-Encoding: gzip\r\n"
+                b"Content-Length: %d\r\n\r\n" % len(gz) + gz)
+            status = resp.split(b"\r\n", 1)[0]
+            self.assertIn(b"413", status,
+                          "解压后超限没被拒绝：%r" % status)
+        finally:
+            server.shutdown()
+
+    def test_connection_cap(self):
+        """连接数上限：超出的新连接直接关闭。"""
+        import waf.proxy as proxy_mod
+        saved = proxy_mod.MAX_CONNECTIONS
+        proxy_mod.MAX_CONNECTIONS = 2
+        server, port = self._start_proxy()
+        held = []
+        try:
+            for _ in range(2):
+                held.append(socket.create_connection(("127.0.0.1", port),
+                                                     timeout=5))
+            time.sleep(0.3)
+            third = socket.create_connection(("127.0.0.1", port), timeout=5)
+            try:
+                third.settimeout(3)
+                self.assertEqual(third.recv(16), b"",
+                                 "超过上限的连接没有被关闭")
+            finally:
+                third.close()
+        finally:
+            for sock in held:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+            server.shutdown()
+            proxy_mod.MAX_CONNECTIONS = saved
+
+
+class TestRound4Misc(unittest.TestCase):
+    """第四轮 #5/#6：叶证书缓存上限、utcnow 弃用。"""
+
+    def test_cert_cache_trim(self):
+        from waf import certs
+        saved = dict(certs._cache)
+        try:
+            certs._cache.clear()
+            for i in range(certs.MAX_CACHE + 20):
+                certs._cache["h%d.local" % i] = (b"c", b"k")
+            certs._trim_cache()
+            self.assertLessEqual(len(certs._cache), certs.MAX_CACHE)
+            # 最新的应该还在
+            self.assertIn("h%d.local" % (certs.MAX_CACHE + 19), certs._cache)
+        finally:
+            certs._cache.clear()
+            certs._cache.update(saved)
+
+    def test_no_deprecated_utcnow(self):
+        path = os.path.join(ROOT, "waf", "certs.py")
+        with open(path, encoding="utf-8") as fh:
+            self.assertNotIn("utcnow", fh.read(),
+                             "certs.py 仍在使用已弃用的 datetime.utcnow()")
+
+
 if __name__ == "__main__":
     unittest.main()

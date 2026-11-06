@@ -61,7 +61,7 @@ def ensure_ca(common_name="HuntGuard Local CA", years=5):
             x509.NameAttribute(NameOID.COMMON_NAME, common_name),
             x509.NameAttribute(NameOID.ORGANIZATION_NAME, "HuntGuard"),
         ])
-        now = datetime.datetime.utcnow()
+        now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
         cert = (
             x509.CertificateBuilder()
             .subject_name(subject)
@@ -212,6 +212,17 @@ def _load_ca():
 _cache = {}
 _cache_lock = threading.RLock()
 
+# 叶证书缓存上限。按 hostname 永久缓存时，MITM 长时间访问大量不同域名
+# 会单调增长（磁盘侧有清理，内存侧没有）。
+MAX_CACHE = 128
+
+
+def _trim_cache():
+    """缓存超限时丢掉最早的一半（dict 保持插入顺序）。"""
+    while len(_cache) > MAX_CACHE:
+        for key in list(_cache)[:max(1, MAX_CACHE // 2)]:
+            _cache.pop(key, None)
+
 
 def leaf_for(hostname, days=825):
     """为 hostname 签发叶证书，返回 (cert_pem_bytes, key_pem_bytes)。"""
@@ -227,7 +238,7 @@ def leaf_for(hostname, days=825):
     from cryptography.hazmat.primitives.asymmetric import rsa
 
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
     subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hostname)])
     builder = (
@@ -260,6 +271,7 @@ def leaf_for(hostname, days=825):
     result = (cert_pem, key_pem)
     with _cache_lock:
         _cache[hostname] = result
+        _trim_cache()
     return result
 
 

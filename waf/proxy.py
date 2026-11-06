@@ -35,6 +35,10 @@ from .models import ScanTarget, Verdict
 MAX_HEADER_BYTES = 256 * 1024
 MAX_BODY_BYTES = 32 * 1024 * 1024
 
+# 同时处理的连接上限。每个连接一个线程，不设上限时慢速
+# CONNECT 洪水会把线程数堆高。本地工具，够用即可。
+MAX_CONNECTIONS = 96
+
 
 class _BodyTooLarge(Exception):
     """请求体超过扫描上限。
@@ -196,12 +200,23 @@ class ProxyServer(object):
                 continue
             except OSError:
                 break
+            with self._lock:
+                self._threads = [t for t in self._threads if t.is_alive()]
+                too_many = len(self._threads) >= MAX_CONNECTIONS
+            if too_many:
+                # 本地工具不需要扛压：超限直接关掉新连接，别让线程数
+                # 无限增长（慢速 CONNECT 洪水会一直占着线程）。
+                self._logger("连接数达到上限 %d，拒绝新连接" % MAX_CONNECTIONS)
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                continue
             thread = threading.Thread(target=self._handle_safe, args=(client, addr))
             thread.daemon = True
             thread.start()
             with self._lock:
                 self._threads.append(thread)
-                self._threads = [t for t in self._threads if t.is_alive()]
 
     def shutdown(self):
         self._stop.set()
@@ -604,6 +619,11 @@ class ProxyServer(object):
             if str(key).lower() == "content-encoding":
                 encoding = str(value)
                 break
+        # 原样转发用这份；解压结果只喂给扫描。
+        #
+        # 不能把解压后的明文拿去转发：Content-Encoding 还在，上游会按
+        # gzip 解明文 → 报错或读成乱码（正常的 gzip 请求被打坏）。
+        raw_body = body
         if encoding and body:
             decoded, status = bodycodec.decode_request_body(body, encoding)
             if bodycodec.is_unsupported(status):
@@ -612,6 +632,18 @@ class ProxyServer(object):
                     "请求体编码 %r 无法解码检查（%s）。"
                     "不能检查的内容不会转发。" % (encoding, status))
                 return False
+            # 解压后可能远大于原始 body（gzip 膨胀比很高）。
+            # 引擎每字段只扫前 max_scan_bytes，超出部分既不扫又照发 ——
+            # 这正是 _read_request 那道限制要堵的盲区，不能在解压路径上
+            # 重新打开。解锁窗口内 _scan_limit() 会放宽到 MAX_BODY_BYTES。
+            limit = self._scan_limit()
+            if len(decoded) > limit:
+                self._send_error(
+                    client, 413, "Payload Too Large",
+                    "解压后 %d 字节超过扫描上限 %d。"
+                    "只扫前一段却转发全部会留下绕过口，因此拒绝。"
+                    % (len(decoded), limit))
+                return False
             body = decoded
 
         # 拦截器未开启（或已被暂停）→ 纯转发，不检查不记录。
@@ -619,7 +651,7 @@ class ProxyServer(object):
         active, _reason = state.should_intercept(engine)
         if not active:
             return self._forward(client, method, scheme, host, port, path_query,
-                                 headers, body, version)
+                                 headers, raw_body, version)
 
         header_dict = {}
         for key, value in headers:
@@ -675,7 +707,7 @@ class ProxyServer(object):
             return False               # 拦截后关闭连接，让客户端拿到完整响应
 
         return self._forward(client, method, scheme, host, port, path_query,
-                             headers, body, version)
+                             headers, raw_body, version)
 
     def _scan_limit(self):
         """本次请求允许的最大 body（与引擎的 max_scan_bytes 一致）。
