@@ -1184,5 +1184,42 @@ class TestRound4Misc(unittest.TestCase):
                              "certs.py 仍在使用已弃用的 datetime.utcnow()")
 
 
+class TestSqlCommentByDefault(EngineCase):
+    """默认配置下 SQL 注释拆字必须被识破（`drop/**/table`）。"""
+
+    def test_sql_comment_split_blocked(self):
+        eng = self.make_engine()
+        for payload in ("drop/**/table", "DROP/**/TABLE",
+                        "1'/**/or/**/1=1;drop/**/table/**/users--"):
+            verdict = eng.scan(_target("http://127.0.0.1/api", body=payload,
+                                       method="POST"), log=False)
+            self.assertTrue(verdict.blocked,
+                            "注释拆字漏拦：%r" % payload)
+
+    def test_default_settings_include_sql_comment(self):
+        self.assertIn("strip_sql_comment",
+                      rules.DEFAULT_SETTINGS["normalize"])
+
+    def test_legacy_normalize_migrated(self):
+        """老配置（没动过 normalize）升级后应跟随新版默认。"""
+        for legacy in rules._LEGACY_NORMALIZE_SETS:
+            doc = rules.default_document()
+            doc["settings"]["normalize"] = list(legacy)
+            doc["defaults_rev"] = 1
+            migrated, changed = rules.migrate_document(doc)
+            self.assertTrue(changed)
+            self.assertEqual(migrated["settings"]["normalize"],
+                             rules.DEFAULT_SETTINGS["normalize"],
+                             "旧默认 %s 没被升级" % legacy)
+
+    def test_customized_normalize_preserved(self):
+        """用户自己裁剪过的 normalize 不能被覆盖。"""
+        doc = rules.default_document()
+        doc["settings"]["normalize"] = ["lower"]
+        doc["defaults_rev"] = 1
+        migrated, _changed = rules.migrate_document(doc)
+        self.assertEqual(migrated["settings"]["normalize"], ["lower"])
+
+
 if __name__ == "__main__":
     unittest.main()

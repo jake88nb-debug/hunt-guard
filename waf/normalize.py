@@ -14,7 +14,29 @@ from urllib.parse import unquote_plus, unquote
 SEPARATORS = r"[\s_\-\.\,;:/\|\\\*\+\~\^`'\"\(\)\[\]\{\}<>@!\?#=&%$]"
 SEP_RE = re.compile(SEPARATORS)
 SQL_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
+
+# 同形字（homoglyph）折叠表：西里尔/希腊里与拉丁字母长得一样的字符。
+# 公开的 WAF 绕过资料里这一条很常见：`dеlete`（е 是 U+0435）在肉眼和
+# 很多日志里都像 `delete`，但归一化之前是另一个码点，关键词匹配不到。
+# 只做"非拉丁 → 拉丁"单向映射，且只收高置信度的字母，避免把正常的
+# 俄语/希腊语文本改写成别的词。
+CONFUSABLES = {
+    # 西里尔
+    "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p",
+    "\u0441": "c", "\u0443": "y", "\u0445": "x", "\u0456": "i",
+    "\u0458": "j", "\u0455": "s", "\u0501": "d", "\u051b": "q",
+    "\u051d": "w", "\u04bb": "h", "\u04cf": "l", "\u043c": "m",
+    "\u043d": "h", "\u043a": "k", "\u0442": "t", "\u0432": "b",
+    "\u0433": "r", "\u043f": "n",
+    # 希腊
+    "\u03b1": "a", "\u03b5": "e", "\u03bf": "o", "\u03c1": "p",
+    "\u03c4": "t", "\u03c5": "u", "\u03bd": "v", "\u03b9": "i",
+    "\u03ba": "k", "\u03c7": "x", "\u03b3": "y", "\u03c9": "w",
+}
 SQL_INLINE_COMMENT_RE = re.compile(r"(?:--|#)[^\n]*")
+# shell 里"当空格用"的变量：`DROP${IFS}TABLE` 展开后就是
+# `DROP TABLE`（公开的 WAF/命令绕过手法）。折叠成空格后按正常文本判。
+SHELL_IFS_RE = re.compile(r"\$\{IFS(?::\d+:\d+)?\}|\$IFS")
 ZERO_WIDTH = "".join([
     "\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u00ad",
     "\u180e", "\u2028", "\u2029",
@@ -274,11 +296,18 @@ def _apply_ops_with_map(text, ops):
                         or any(ord(ch) < 32 and ch not in "\t\n\r"
                                for ch in now)):
                     continue
-            if op == "strip_sql_comment" and "/*" not in now:
+            if op == "strip_sql_comment" and not (
+                    "/*" in now or "--" in now or "#" in now):
                 continue
             if op == "collapse_ws" and not (
                     "  " in now or "\t" in now or "\n" in now
                     or "\r" in now or "\f" in now or "\v" in now):
+                continue
+            if op == "fold_confusables" and not any(
+                    ch in CONFUSABLES for ch in now):
+                continue
+            if op == "fold_shell_vars" and "$IFS" not in now \
+                    and "${IFS" not in now:
                 continue
             if op == "compact" and not SEP_RE.search(now):
                 continue
@@ -299,7 +328,15 @@ def _apply_ops_with_map(text, ops):
             elif op == "strip_invisible":
                 chars, idx = _strip_with_map(chars, idx)
             elif op == "strip_sql_comment":
+                # 块注释 /*...*/ 与行注释 -- / # 都要处理（公开资料里
+                # `drop--\n table` / `id=1/**/OR/**/1=1` 都是常规手法）。
                 chars, idx = _strip_with_map(chars, idx, SQL_COMMENT_RE)
+                chars, idx = _strip_with_map(chars, idx,
+                                             SQL_INLINE_COMMENT_RE)
+            elif op == "fold_confusables":
+                chars, idx = _fold_confusables_with_map(chars, idx)
+            elif op == "fold_shell_vars":
+                chars, idx = _strip_with_map(chars, idx, SHELL_IFS_RE)
             elif op == "collapse_ws":
                 chars, idx = _collapse_with_map(chars, idx)
             elif op == "lower":
@@ -455,6 +492,15 @@ def _strip_with_map(chars, idx, pattern=None):
         last = match.end()
     out_chars.extend(chars[last:])
     out_idx.extend(idx[last:])
+    return out_chars, out_idx
+
+
+def _fold_confusables_with_map(chars, idx):
+    """同形字 1:1 替换，偏移不变。"""
+    out_chars, out_idx = [], []
+    for ch, origin in zip(chars, idx):
+        out_chars.append(CONFUSABLES.get(ch, ch))
+        out_idx.append(origin)
     return out_chars, out_idx
 
 

@@ -24,7 +24,7 @@ MARKER = "AGENT_WAF_HOME"      # 保留：供 install_path 复用
 # 注意：**改了任何内置规则的内容都必须 +1**，否则磁盘上的 rules.json
 # 不会更新（迁移靠 rev 比较触发）。实测踩过：改完正则忘了提版本，
 # 测试跑出来的还是旧规则的行为。
-DEFAULTS_REV = 16
+DEFAULTS_REV = 18
 
 # rev < 此值的规则视为"早期内置规则"，允许升级时刷新内容。
 # 仅用于兼容没有 _builtin_hash 标记的历史文件；rev 达到此值后，
@@ -119,8 +119,9 @@ DEFAULT_SETTINGS = {
     "mode": "block",
     "case_sensitive": False,
     "normalize": ["url_decode", "html_unescape", "unicode_unescape",
-                  "fold_fullwidth", "strip_invisible", "collapse_ws",
-                  "compact", "lower"],
+                  "fold_fullwidth", "url_decode", "fold_confusables",
+                  "fold_shell_vars", "strip_invisible", "strip_sql_comment",
+                  "collapse_ws", "compact", "lower"],
     "scan_headers": True,
     "max_scan_bytes": 262144,
     "fail_mode": "closed",
@@ -129,10 +130,25 @@ DEFAULT_SETTINGS = {
     "unlock_reason": "",
 }
 
+# 1.1.13 及更早版本的默认 normalize 列表。迁移时用"用户的值是否
+# 恰好等于它"来判断用户有没有动过这个设置：等于则跟随新版默认，
+# 不等（用户自己裁剪/增删过）则原样保留。
+_LEGACY_NORMALIZE_SETS = (
+    # 1.1.13 及更早
+    ["url_decode", "html_unescape", "unicode_unescape", "fold_fullwidth",
+     "strip_invisible", "collapse_ws", "compact", "lower"],
+    # 1.1.14（加了 SQL 注释剥离）
+    ["url_decode", "html_unescape", "unicode_unescape", "fold_fullwidth",
+     "strip_invisible", "strip_sql_comment", "collapse_ws", "compact",
+     "lower"],
+)
+
+
 # normalize 支持的 op 名（与 normalize._apply_ops_with_map 的分支一致）
 NORMALIZE_OPS = frozenset([
     "url_decode", "html_unescape", "unicode_unescape", "fold_fullwidth",
     "strip_invisible", "strip_sql_comment", "collapse_ws", "compact", "lower",
+    "fold_confusables", "fold_shell_vars",
 ])
 
 
@@ -187,7 +203,9 @@ def _sanitize_settings(settings):
         if not isinstance(op, str):
             continue
         name = op.strip().lower()
-        if name in NORMALIZE_OPS and name not in clean:
+        # 允许重复：`url_decode → fold_fullwidth → url_decode` 是必要的
+        # （全角百分号要先折叠再解一次），去重会把它砍成一次。
+        if name in NORMALIZE_OPS and len(clean) < 16:
             clean.append(name)
     out["normalize"] = clean
     return out
@@ -1135,9 +1153,19 @@ def migrate_document(doc):
     for key, value in DEFAULT_SETTINGS.items():
         settings.setdefault(key, copy.deepcopy(value))
 
+    upgraded = False
+    # 归一化列表的升级：老版本的默认值里没有 strip_sql_comment，
+    # 于是 `drop/**/table` 这类注释拆字在默认配置下漏拦（实测）。
+    # 只在用户**没动过**时替换 —— 值不等于旧默认就说明是自己配的。
+    current = settings.get("normalize")
+    if isinstance(current, list) and list(current) in [
+            list(item) for item in _LEGACY_NORMALIZE_SETS]:
+        settings["normalize"] = copy.deepcopy(DEFAULT_SETTINGS["normalize"])
+        upgraded = True
+
     doc["defaults_rev"] = DEFAULTS_REV
     doc["migrated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    return doc, bool(added or updated)
+    return doc, bool(added or updated or upgraded)
 
 
 # ---------------------------------------------------------------- 校验
